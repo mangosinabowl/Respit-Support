@@ -12,7 +12,7 @@ interface SeqRecord {
 export class EventConflictError extends Error {
   constructor(
     message: string,
-    readonly stored: DomainEvent,
+    readonly stored: DomainEvent | undefined,
     readonly incoming: DomainEvent
   ) {
     super(message);
@@ -26,39 +26,50 @@ export class RespiteDb extends Dexie {
 
   constructor(name = "respite-support") {
     super(name);
+    // v1: Original schema shipped to users (non-unique compound index)
     this.version(1).stores({
-      events: "eventId, entityType, entityId, recordedAt, &[deviceId+seq]",
+      events: "eventId, entityType, entityId, recordedAt, deviceId, [deviceId+seq]",
       seqs: "deviceId",
     });
+    // v2: Add seqs table and deduplicate (deviceId, seq) pairs
     this.version(2)
       .stores({
-        events: "eventId, entityType, entityId, recordedAt, &[deviceId+seq]",
+        events: "eventId, entityType, entityId, recordedAt, deviceId, [deviceId+seq]",
         seqs: "deviceId",
       })
       .upgrade(async (tx) => {
-        // Resolve any duplicate (deviceId, seq) pairs from v1 by renumbering them
+        // Deduplicate any (deviceId, seq) pairs from v1
         const allEvents = await tx.table<DomainEvent>("events").toArray();
-        const seen = new Map<string, number>();
+        const perDeviceMax = new Map<string, number>();
+        const seen = new Set<string>();
         const toUpdate: DomainEvent[] = [];
 
+        // First pass: track max seq per device and identify duplicates
         for (const event of allEvents) {
           const key = `${event.deviceId}:${event.seq}`;
+          const max = perDeviceMax.get(event.deviceId) ?? 0;
+          perDeviceMax.set(event.deviceId, Math.max(max, event.seq));
+
           if (seen.has(key)) {
-            // Duplicate found; renumber it to a fresh seq for this device
-            const nextSeqForDevice = Math.max(
-              ...(allEvents
-                .filter((e) => e.deviceId === event.deviceId)
-                .map((e) => e.seq) || [0])
-            ) + 1;
-            toUpdate.push({ ...event, seq: nextSeqForDevice });
-          } else {
-            seen.set(key, event.seq);
+            // Duplicate found; mark for renumbering
+            toUpdate.push({ ...event, _duplicate: true } as any);
           }
+          seen.add(key);
         }
 
+        // Second pass: renumber duplicates, tracking updated max
         for (const event of toUpdate) {
-          await tx.table<DomainEvent>("events").put(event);
+          const max = perDeviceMax.get(event.deviceId) ?? 0;
+          const newSeq = max + 1;
+          perDeviceMax.set(event.deviceId, newSeq);
+          await tx.table<DomainEvent>("events").put({ ...event, seq: newSeq, _duplicate: undefined } as any);
         }
+      });
+    // v3: Make (deviceId, seq) unique
+    this.version(3)
+      .stores({
+        events: "eventId, entityType, entityId, recordedAt, deviceId, &[deviceId+seq]",
+        seqs: "deviceId",
       });
   }
 }
@@ -72,16 +83,27 @@ export async function appendEvent(db: RespiteDb, event: DomainEvent): Promise<vo
       throw err;
     }
     // Constraint error: could be duplicate eventId (idempotent) or collision on (deviceId, seq).
-    // Read what's stored and compare.
-    const stored = await db.events.get(event.eventId);
+    // Try both lookups.
+    let stored = await db.events.get(event.eventId);
+    if (!stored) {
+      // Not found by eventId; might be collision on (deviceId, seq).
+      // Look up by the compound index.
+      const withSameSeq = await db.events
+        .where("deviceId")
+        .equals(event.deviceId)
+        .filter((e) => e.seq === event.seq)
+        .first();
+      stored = withSameSeq;
+    }
+
     if (stored && deepEqual(stored, event)) {
       // Identical event already stored: genuine idempotency, return silently.
       return;
     }
-    // Different event (same eventId but different content, or collision on (deviceId, seq)): this is an error.
+    // Different event or collision: this is an error.
     throw new EventConflictError(
-      `Event conflict: attempted to store an event that collides with an existing one. EventId: ${event.eventId}`,
-      stored!,
+      `Event conflict: attempted to store an event that collides with an existing one. EventId: ${event.eventId}, DeviceId: ${event.deviceId}, Seq: ${event.seq}`,
+      stored,
       event
     );
   }
