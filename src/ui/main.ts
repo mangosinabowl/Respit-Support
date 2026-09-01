@@ -8,7 +8,8 @@ import type { Shift, Expense, Client } from "../domain/entities";
 const db = new RespiteDb();
 const dev = deviceId();
 const app = document.getElementById("app")!;
-const money = (c: number) => `£${(c / 100).toFixed(2)}`;
+// Canadian dollars. Amounts are integer cents everywhere underneath.
+const money = (c: number) => new Intl.NumberFormat("en-CA", { style: "currency", currency: "CAD" }).format(c / 100);
 const time = (s: string) => new Date(s).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
 async function emit(fields: Parameters<typeof makeEvent>[2], type: Parameters<typeof makeEvent>[0], id: string) {
@@ -35,7 +36,7 @@ async function render() {
         : clients.length
           ? `<label>Who are you with?</label>
              <select id="who">${clients.map((c) => `<option value="${c.id}">${c.name}</option>`).join("")}</select>
-             <label>Rate £/hr</label><input id="rate" type="number" value="30" step="0.5" />
+             <label>Rate $/hr (CAD)</label><input id="rate" type="number" value="30" step="0.5" />
              <button id="start" class="primary">Start shift</button>`
           : `<p class="empty">Add someone you support first.</p>`}
     </section>
