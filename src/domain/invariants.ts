@@ -74,6 +74,11 @@ export function checkTrip(trip: Trip): Violation[] {
   }
 
   for (const s of trip.splits) {
+    // Note: We reject negative (<0), not non-positive (<=0), unlike checkExpense's NON_POSITIVE_TOTAL.
+    // A $0.00 trip split can arise legitimately from largest-remainder allocation when a small
+    // distanceShare rounds to zero cents. Accepting zero here avoids blocking a correct trip that
+    // the worker cannot fix; rejecting it would create an unsolvable error. Expenses are different:
+    // a $0.00 receipt is unambiguously an error.
     if (s.distanceShare < 0 || s.claimAmount < 0) {
       violations.push({
         code: "NEGATIVE_CLAIM",

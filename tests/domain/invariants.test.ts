@@ -113,6 +113,13 @@ describe("checkTrip", () => {
     expect(v.map((x) => x.code)).toContain("NEGATIVE_CLAIM");
   });
 
+  it("accepts a zero claim, which largest-remainder splitting can produce honestly", () => {
+    const v = checkTrip(
+      trip({ splits: [{ clientId: "c1", payerPartyId: "p1", distanceShare: 0, rateApplied: 67, claimAmount: 0 }] }),
+    );
+    expect(v).toEqual([]);
+  });
+
   it("allows fuel cost to be recorded alongside a mileage claim without adding it", () => {
     const withFuel = trip({ fuelCostAmount: 4500 });
     expect(checkTrip(withFuel)).toEqual([]);
