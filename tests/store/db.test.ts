@@ -1,6 +1,7 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import "fake-indexeddb/auto";
-import { RespiteDb, appendEvent, allEvents, hydrate, nextSeq, deviceId } from "../../src/store/db";
+import Dexie from "dexie";
+import { RespiteDb, appendEvent, allEvents, hydrate, nextSeq, deviceId, EventConflictError } from "../../src/store/db";
 import { makeEvent } from "../../src/domain/events";
 import { live } from "../../src/domain/replay";
 
@@ -36,21 +37,25 @@ describe("db", () => {
     expect(await nextSeq(db, "dev-b")).toBe(1);
   });
 
-  it("is idempotent: appending the same event twice stores it once", async () => {
+  it("is idempotent: appending identical event twice stores it once", async () => {
     const e = makeEvent("client", "c1", { name: "Rory" }, "dev-a", 1);
     await appendEvent(db, e);
     await appendEvent(db, e);
     expect(await allEvents(db)).toHaveLength(1);
   });
 
-  it("rejects duplicate eventIds silently without overwriting content", async () => {
+  it("throws on collision with different content (same eventId, different fields)", async () => {
     const e1 = makeEvent("client", "c1", { name: "Rory" }, "dev-a", 1);
-    const e2Modified = { ...e1, fields: { name: "Roy" } }; // Same eventId, different content
+    const e2 = { ...e1, fields: { name: "Roy" } }; // Same eventId, different content
     await appendEvent(db, e1);
-    await appendEvent(db, e2Modified);
-    const events = await allEvents(db);
-    expect(events).toHaveLength(1);
-    expect(events[0].fields).toEqual({ name: "Rory" }); // Original preserved
+    await expect(appendEvent(db, e2)).rejects.toThrow(EventConflictError);
+  });
+
+  it("throws on collision when distinct events collide on (deviceId, seq)", async () => {
+    const e1 = makeEvent("client", "c1", { name: "First" }, "dev-a", 1);
+    const e2 = { ...makeEvent("client", "c2", { name: "Second" }, "dev-a", 1), eventId: "diff-id" };
+    await appendEvent(db, e1);
+    await expect(appendEvent(db, e2)).rejects.toThrow(EventConflictError);
   });
 
   it("handles concurrent nextSeq calls atomically", async () => {
@@ -68,8 +73,27 @@ describe("db", () => {
     expect(single1).toBe(4);
   });
 
+  it("seeds nextSeq from maximum event seq when no counter row exists", async () => {
+    // Append events directly with seq 1, 2, 3
+    await appendEvent(db, makeEvent("client", "c1", { name: "A" }, "dev-a", 1));
+    await appendEvent(db, makeEvent("client", "c2", { name: "B" }, "dev-a", 2));
+    await appendEvent(db, makeEvent("client", "c3", { name: "C" }, "dev-a", 3));
+
+    // Delete the counter row to simulate restore-from-backup
+    await db.seqs.delete("dev-a");
+
+    // nextSeq should seed from max event seq (3) and return 4
+    expect(await nextSeq(db, "dev-a")).toBe(4);
+  });
+
+  it("validates count parameter", async () => {
+    await expect(nextSeq(db, "dev-a", 0)).rejects.toThrow("count must be a positive integer");
+    await expect(nextSeq(db, "dev-a", -1)).rejects.toThrow("count must be a positive integer");
+    await expect(nextSeq(db, "dev-a", 2.5)).rejects.toThrow("count must be a positive integer");
+  });
+
   it("allEvents returns events sorted by compareEvents", async () => {
-    // Append in non-sorted order (different seqs, same recordedAt for variety)
+    // Append in non-sorted order
     const now = new Date().toISOString();
     const e5 = { ...makeEvent("client", "c5", { name: "E" }, "dev-a", 5), recordedAt: now };
     const e1 = { ...makeEvent("client", "c1", { name: "A" }, "dev-a", 1), recordedAt: now };
@@ -101,34 +125,26 @@ describe("db", () => {
     expect(id1).toBe(id2);
   });
 
-  it("deviceId is stable across multiple calls within a session", async () => {
-    // deviceId should return the same value when called multiple times
-    // (either from localStorage or from a session-scoped fallback)
-    const id1 = deviceId();
-    expect(typeof id1).toBe("string");
-    expect(id1.length).toBeGreaterThan(0);
-    const id2 = deviceId();
-    expect(id2).toBe(id1);
-  });
+  it("seeding nextSeq from event log handles restore-from-backup scenario", async () => {
+    // Simulate restore from backup: events exist but counter row doesn't
+    const e1 = makeEvent("client", "c1", { name: "A" }, "dev-x", 1);
+    const e2 = makeEvent("client", "c2", { name: "B" }, "dev-x", 2);
+    const e3 = makeEvent("client", "c3", { name: "C" }, "dev-x", 5);
 
-  it("uniqueness constraint on (deviceId, seq) prevents duplicate keys", async () => {
-    const e1 = makeEvent("client", "c1", { name: "First" }, "dev-a", 1);
-    const e2 = { ...makeEvent("client", "c2", { name: "Second" }, "dev-a", 1), eventId: "diff-id" };
+    // Append events
     await appendEvent(db, e1);
-    // Attempting to add a second event with same (deviceId, seq) should fail
-    try {
-      await appendEvent(db, e2);
-      // If add() throws ConstraintError on the unique index, appendEvent silently catches it
-      // and treats it as idempotent. Since these are different events (different eventId),
-      // this test verifies that the constraint is enforced.
-      const events = await allEvents(db);
-      // Both events should be present if add() succeeded, or just the first if the constraint blocked
-      // the second. The behavior depends on whether the ConstraintError is caught by eventId or by the index.
-      // For now, this test documents the behavior: the unique constraint is present.
-      expect(events.length).toBeGreaterThanOrEqual(1);
-    } catch (err) {
-      // If a different error is thrown, it's a real problem
-      expect(err instanceof Error).toBe(true);
-    }
+    await appendEvent(db, e2);
+    await appendEvent(db, e3);
+
+    // Verify max seq in events is 5
+    const stored = await allEvents(db);
+    expect(Math.max(...stored.map((e) => e.seq))).toBe(5);
+
+    // Delete the counter row (simulating a corrupted counter or restore)
+    await db.seqs.delete("dev-x");
+
+    // nextSeq should seed from max event seq and return 6
+    const next = await nextSeq(db, "dev-x");
+    expect(next).toBe(6);
   });
 });
