@@ -7,8 +7,8 @@ Implemented audience filtering for the highest-severity module in the codebase t
 ## Implementation Summary
 
 **Files Created:**
-- `src/domain/audience.ts` — Filtering module (169 lines)
-- `tests/domain/audience.test.ts` — Test suite with 48 tests (638 lines)
+- `src/domain/audience.ts` — Filtering module (238 lines)
+- `tests/domain/audience.test.ts` — Test suite with 53 tests (710 lines)
 
 **Files Modified:**
 - `src/domain/entities.ts` — Added optional `clientId?: Id` to Note interface (1 line)
