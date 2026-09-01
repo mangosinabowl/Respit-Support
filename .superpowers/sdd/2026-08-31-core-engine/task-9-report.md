@@ -242,3 +242,129 @@ This is a schema constraint limitation; a proper long-term fix would add per-par
 - ✓ Fail-closed on missing visibility, missing clientId, missing partyId
 - ✓ Payer and guardian guards tested independently
 - ✓ All 132 tests passing, no regression
+
+---
+
+# Fix Round 3: Correctness (Type Safety, Running Shifts, Field Omission)
+
+## Summary
+
+Fix Round 3 addressed correctness issues where the filtered-view returns were non-truthful without being leaks: hardcoded false values, collapsed time windows, and type-system gaps. Five separate vulnerabilities that would silently fail in downstream tasks (e.g., Task 12's reimbursement bucketing). All issues fixed and tested.
+
+## Critical Changes
+
+### 1. **Type Safety - Filtered-View Types**
+
+**Problem:** `as unknown as Shift` and `as unknown as Expense` type assertions allowed consumers to read undefined fields as if they were defined, causing silent failures (e.g., `switch (expense.reimbursementStatus)` believes the switch is exhaustive and a "paid" status matches no case).
+
+**Fix:** Introduced true filtered-view types:
+```typescript
+export type FilteredShift = Omit<Shift, "isIncident" | "reimbursementStatus">;
+export type FilteredExpense = Omit<Expense, "reimbursementStatus">;
+```
+
+- `filterShiftFor` returns `Shift | FilteredShift | null` (Shift for me, FilteredShift for others)
+- `filterExpenseFor` returns `Expense | FilteredExpense | null` (Expense for me, FilteredExpense for others)
+- **No more type assertions** — compile errors replace undefined-at-runtime behavior
+- Test type annotations updated to accept the filtered types
+
+### 2. **Running Shift Collapse**
+
+**Problem:** `endAt` was set to `startAt` when visible participants had no `outAt`. A child collected at 23:00 during an open shift showed `endAt: 23:00`, not `endAt: null`, masking that the shift was still running.
+
+**Fix:** `endAt` is now:
+- `null` when any visible participant is still present (no `outAt`)
+- Maximum `outAt` of visible participants when all have concluded
+
+**Test:** "handles running shift (endAt: null): null when any visible participant is still present"
+
+### 3. **reimbursementStatus Hardcoding**
+
+**Problem:** `audience.ts:109` set `reimbursementStatus: "unclaimed"` (hardcoded false value), directly mirroring the earlier `isIncident: false` error — a paid claim would read as unclaimed to the payer.
+
+**Fix:** Omitted entirely from non-me shift allow-lists (like isIncident), via FilteredShift type.
+
+**Tests:** 
+- "does not expose reimbursementStatus to non-me audience" (shift)
+- "does not expose reimbursementStatus to non-me audience" (expense)
+
+### 4. **isSingleSplit Over-Strict**
+
+**Problem:** Receipt and description inclusion checked `expense.splits.length === 1`, withholding data from a payer who funded two of their own children's meals in one transaction.
+
+**Fix:** Changed to "every split in the expense is visible to this audience" — if all splits belong to the payer, include their receipt and description.
+
+**Test:** "includes receiptAttachmentIds and description for same-payer multi-split"
+
+### 5. **Unpinned Exclusions**
+
+**Problem:** `submissionId` exclusion had no test; mutation readdition passed all tests.
+
+**Tests Added:**
+- "does not include submissionId in non-me shift"
+
+## Test Suite Results
+
+**Command:**
+```bash
+wc -l src/domain/audience.ts tests/domain/audience.test.ts
+```
+
+**Output:**
+```
+238 src/domain/audience.ts
+710 tests/domain/audience.test.ts
+948 total
+```
+
+**Test counts by describe block:**
+```
+clientsVisibleTo: 7 tests
+filterShiftFor: 17 tests (+ 3 from Round 3: running shift, reimbursementStatus, submissionId)
+filterExpenseFor: 16 tests (+ 2 from Round 3: same-payer multi-split, reimbursementStatus)
+filterNotesFor: 10 tests
+Leak check: 3 tests
+Total in audience.test.ts: 53 tests
+```
+
+**Full suite:**
+```bash
+npm test
+```
+
+**Output (01:27:41 UTC):**
+```
+> tsc --noEmit && vitest run
+
+ RUN  v4.1.11 C:/Users/aandr/OneDrive/Documentos/Respit Support
+
+ Test Files  9 passed (9)
+      Tests  137 passed (137)
+   Start at  01:27:41
+   Duration  924ms (transform 1.06s, setup 0ms, import 1.94s, tests 352ms, environment 2ms)
+```
+
+- 84 existing tests: all pass (no regression)
+- 53 new audience tests: all pass
+- Task 4 entities.test.ts: passes unchanged
+
+**Type checking:**
+```bash
+npx tsc --noEmit
+```
+Result: ✓ No errors
+
+## Commits
+
+```
+e54e03e fix: correct Round 3 issues - type safety and edge cases
+```
+
+## Code Quality
+
+- ✓ FilteredShift and FilteredExpense types eliminate type-system blind spots
+- ✓ Running shift handling preserves null to signal ongoing state
+- ✓ All hardcoded false values replaced with field omission
+- ✓ Receipt/description logic now correctly allows same-payer multi-child expenses
+- ✓ All 137 tests passing, no regression
+- ✓ Type-strict compilation with no assertions
