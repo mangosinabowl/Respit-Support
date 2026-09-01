@@ -91,4 +91,57 @@ describe("allocateTime", () => {
       expect(claims.find((c) => c.clientId === "c2")!.amount).toBe(6000);
     });
   });
+
+  describe("returning client (same child leaves and comes back)", () => {
+    it("accumulates time across multiple stays with fullPerPayer and emits one claim per client", () => {
+      // c1 is present 15:00–16:00 (60 min), then again 17:00–18:00 (60 min)
+      // Total: 120 minutes for payer-c1, should emit exactly ONE claim
+      const claims = allocateTime([
+        p("c1", T(15), T(16), "fullPerPayer"),
+        p("c1", T(17), T(18), "fullPerPayer"),
+      ]);
+      // Exactly one claim for c1
+      expect(claims.filter((c) => c.clientId === "c1")).toHaveLength(1);
+      expect(claims.find((c) => c.clientId === "c1")!.minutes).toBe(120);
+      expect(claims.find((c) => c.clientId === "c1")!.amount).toBe(6000);
+    });
+
+    it("handles a returning client mixed with a different client present throughout", () => {
+      // c1: 15:00–16:00 (60 min), then 17:00–18:00 (60 min) = 120 min total
+      // c2: 15:00–18:00 (180 min) throughout
+      const claims = allocateTime([
+        p("c1", T(15), T(16), "fullPerPayer"),
+        p("c2", T(15), T(18), "fullPerPayer"),
+        p("c1", T(17), T(18), "fullPerPayer"),
+      ]);
+      // c1 should have exactly one claim with 120 minutes
+      const c1Claims = claims.filter((c) => c.clientId === "c1");
+      expect(c1Claims).toHaveLength(1);
+      expect(c1Claims[0].minutes).toBe(120);
+      // c2 should have exactly one claim with 180 minutes
+      const c2Claims = claims.filter((c) => c.clientId === "c2");
+      expect(c2Claims).toHaveLength(1);
+      expect(c2Claims[0].minutes).toBe(180);
+    });
+  });
+
+  describe("splitEvenly rounding", () => {
+    it("derives amount from rounded minutes so a payer's own arithmetic reconciles", () => {
+      // Three participants sharing 100 minutes (not evenly divisible)
+      // Each should get 33.333... minutes, rounded to 33
+      // Amount should be Math.round((33 / 60) * 3000)
+      const claims = allocateTime([
+        p("c1", "2026-03-01T15:00:00.000Z", "2026-03-01T16:40:00.000Z", "splitEvenly"),
+        p("c2", "2026-03-01T15:00:00.000Z", "2026-03-01T16:40:00.000Z", "splitEvenly"),
+        p("c3", "2026-03-01T15:00:00.000Z", "2026-03-01T16:40:00.000Z", "splitEvenly"),
+      ]);
+      // 100 minutes / 3 = 33.333..., rounds to 33
+      const expectedMinutes = 33;
+      const expectedAmount = Math.round((expectedMinutes / 60) * 3000);
+      claims.forEach((claim) => {
+        expect(claim.minutes).toBe(expectedMinutes);
+        expect(claim.amount).toBe(expectedAmount);
+      });
+    });
+  });
 });

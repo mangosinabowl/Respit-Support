@@ -29,7 +29,7 @@ export function allocateTime(participants: Participant[]): TimeClaim[] {
 
   for (const p of present) {
     if (p.timeRule === "fullPerPayer") {
-      minutesByClient.set(p.clientId, minutesBetween(p.inAt, p.outAt));
+      minutesByClient.set(p.clientId, (minutesByClient.get(p.clientId) ?? 0) + minutesBetween(p.inAt, p.outAt));
     }
   }
 
@@ -44,13 +44,23 @@ export function allocateTime(participants: Participant[]): TimeClaim[] {
     }
   }
 
-  return present.map((p) => {
-    const minutes = Math.round(minutesByClient.get(p.clientId) ?? 0);
-    return {
-      clientId: p.clientId,
-      payerPartyId: p.payerPartyId,
-      minutes,
-      amount: Math.round((minutes / 60) * p.payRate),
-    };
-  });
+  // Emit one claim per (clientId, payerPartyId) pair, preserving order of first appearance
+  const seenPairs = new Set<string>();
+  const claims: TimeClaim[] = [];
+
+  for (const p of present) {
+    const pairKey = `${p.clientId}:${p.payerPartyId}`;
+    if (!seenPairs.has(pairKey)) {
+      seenPairs.add(pairKey);
+      const minutes = Math.round(minutesByClient.get(p.clientId) ?? 0);
+      claims.push({
+        clientId: p.clientId,
+        payerPartyId: p.payerPartyId,
+        minutes,
+        amount: Math.round((minutes / 60) * p.payRate),
+      });
+    }
+  }
+
+  return claims;
 }
