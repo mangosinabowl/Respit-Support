@@ -62,4 +62,26 @@ describe("owedByPayer", () => {
   it("returns nothing for an empty store", () => {
     expect(owedByPayer(replay([]))).toEqual([]);
   });
+
+  it("surfaces a record with a missing or unrecognised status as unclaimed", () => {
+    const store = replay([
+      ev("shift", "s9", {
+        startAt: T(9), endAt: T(12),
+        participants: [{ clientId: "c1", payerPartyId: "p9", inAt: T(9), outAt: T(12), payRate: 3000, timeRule: "fullPerPayer" }],
+      }),
+    ]);
+    // Dropping it would hide 3 hours of real work from the Owed screen with
+    // nothing to indicate anything was missing.
+    expect(owedByPayer(store)).toEqual([{ payerPartyId: "p9", unclaimed: 9000, submitted: 0, paid: 0 }]);
+  });
+
+  it("still excludes notReimbursable, which genuinely is owed by nobody", () => {
+    const store = replay([
+      ev("expense", "x9", {
+        totalAmount: 500, reimbursementStatus: "notReimbursable",
+        splits: [{ payerPartyId: "p9", amount: 500 }],
+      }),
+    ]);
+    expect(owedByPayer(store)).toEqual([]);
+  });
 });

@@ -14,7 +14,12 @@ type Bucket = "unclaimed" | "submitted" | "paid";
 
 function bucketOf(status: string): Bucket | null {
   if (status === "unclaimed" || status === "submitted" || status === "paid") return status;
-  return null; // notReimbursable is never owed by anyone
+  if (status === "notReimbursable") return null; // genuinely owed by nobody
+  // Anything else - a missing status, or one this build does not recognise -
+  // is treated as unclaimed rather than dropped. Silently omitting a record
+  // means work that never reaches an invoice and nothing on screen to hint it
+  // exists; showing it as unclaimed is visible and correctable.
+  return "unclaimed";
 }
 
 /** What each payer owes right now, split into unclaimed, waiting, and paid. */
