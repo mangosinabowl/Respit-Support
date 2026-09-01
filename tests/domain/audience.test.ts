@@ -348,3 +348,71 @@ describe("filterNotesFor", () => {
     }).not.toThrow();
   });
 });
+
+describe("Leak check: two-family shift with metadata", () => {
+  const shiftWithMetadata: Shift = {
+    id: "s1",
+    occurredAt: "2026-03-01T22:00:00.000Z",
+    recordedAt: "2026-03-01T22:00:00.000Z",
+    zone: "UTC",
+    startAt: "2026-03-01T22:00:00.000Z",
+    endAt: "2026-03-02T01:00:00.000Z",
+    participants: [
+      { clientId: "rory", payerPartyId: "agencyA", inAt: "2026-03-01T22:00:00.000Z", outAt: "2026-03-02T01:00:00.000Z", payRate: 3000, timeRule: "fullPerPayer" },
+      { clientId: "sam", payerPartyId: "familyB", inAt: "2026-03-01T23:00:00.000Z", outAt: "2026-03-02T00:30:00.000Z", payRate: 2500, timeRule: "fullPerPayer" },
+    ],
+    isIncident: true,
+    reimbursementStatus: "unclaimed",
+    tags: ["tag-sam", "shared-concern"],
+    customFields: { note: "Sam was upset today" },
+  };
+
+  const expenseWithMetadata: Expense = {
+    id: "e1",
+    occurredAt: "2026-03-01T23:00:00.000Z",
+    recordedAt: "2026-03-01T23:00:00.000Z",
+    zone: "UTC",
+    totalAmount: 3400,
+    category: "food",
+    description: "Lunch with Sam at his favorite pizza place",
+    receiptAttachmentIds: ["a1", "a2", "a3"],
+    splits: [
+      { clientId: "rory", payerPartyId: "agencyA", amount: 1700 },
+      { clientId: "sam", payerPartyId: "familyB", amount: 1700 },
+    ],
+    reimbursementStatus: "unclaimed",
+    tags: ["shared-meal"],
+    customFields: { venue: "Sams Place" },
+  };
+
+  it("completely removes all trace of sam from shift metadata", () => {
+    const filtered = filterShiftFor(shiftWithMetadata, { audience: "payer", partyId: "agencyA" }, ["rory"])!;
+
+    const json = JSON.stringify(filtered);
+    expect(json).not.toContain("sam");
+    expect(json).not.toContain("familyB");
+    expect(json).not.toContain("upset");
+    expect(json).not.toContain("tag-sam");
+    expect(json).not.toContain("shared-concern");
+    expect(json).not.toContain("Sam was upset");
+
+    expect(filtered.tags).toEqual([]);
+    expect(filtered.customFields).toEqual({});
+    expect(filtered.isIncident).toBe(false);
+  });
+
+  it("completely removes all trace of sam from expense metadata", () => {
+    const filtered = filterExpenseFor(expenseWithMetadata, { audience: "payer", partyId: "agencyA" }, ["rory"])!;
+
+    const json = JSON.stringify(filtered);
+    expect(json).not.toContain("sam");
+    expect(json).not.toContain("familyB");
+    expect(json).not.toContain("favorite");
+    expect(json).not.toContain("pizza");
+
+    expect(filtered.description).toBe("");
+    expect(filtered.receiptAttachmentIds).toEqual([]);
+    expect(filtered.tags).toEqual([]);
+    expect(filtered.customFields).toEqual({});
+  });
+});
