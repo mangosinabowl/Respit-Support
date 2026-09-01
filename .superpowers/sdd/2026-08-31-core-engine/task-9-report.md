@@ -459,3 +459,28 @@ Result: ✓ No errors
 - ✓ All untested branches now have named tests
 - ✓ Type system ensures filtered views cannot be read for removed fields
 - ✓ No regression from rounds 1–3
+
+---
+
+# Fix Round 5: Final Test Coverage
+
+**Added the missing open-shift maxOutAt test** — shift with `endAt: null` (still running), visible participant has `outAt: 23:00`, expect `filtered.endAt === "...T23:00:00.000Z"`. Includes hidden family-B participant who is still present, confirming no cross-family leak in the open-shift case.
+
+**Test Results:**
+```bash
+npm test
+```
+```
+Test Files  9 passed (9)
+     Tests  141 passed (141)
+   Start at  05:14:26
+   Duration  953ms
+```
+
+**Type check:**
+```bash
+npx tsc --noEmit
+```
+✓ No errors
+
+**Commit:** `ed36434 fix: add missing open-shift maxOutAt test for Round 5`
