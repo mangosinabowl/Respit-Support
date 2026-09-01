@@ -1,5 +1,5 @@
 import type { Id } from "./primitives";
-import type { ClientPartyRole, Expense, Note, Shift } from "./entities";
+import type { ClientPartyRole, Client, Expense, Note, Shift } from "./entities";
 import { live, type EntityStore } from "./replay";
 
 export type Audience = "me" | "payer" | "guardian";
@@ -18,14 +18,33 @@ export interface AudienceContext {
  * record that should not be visible is absent rather than redacted.
  */
 export function clientsVisibleTo(store: EntityStore, ctx: AudienceContext): Id[] {
+  // Build set of deleted client IDs by checking the full store (including deleted records)
+  const deletedClientIds = new Set<Id>();
+  for (const clientRecord of store.client.values()) {
+    if (clientRecord.deleted) {
+      deletedClientIds.add(clientRecord.id);
+    }
+  }
+
   if (ctx.audience === "me") {
     const roles = live(store, "role") as unknown as ClientPartyRole[];
-    return [...new Set(roles.map((r) => r.clientId))].sort();
+    return [
+      ...new Set(
+        roles
+          .filter((r) => !deletedClientIds.has(r.clientId))
+          .map((r) => r.clientId),
+      ),
+    ].sort();
   }
   if (!ctx.partyId) return [];
   const wanted = ctx.audience === "payer" ? "payer" : "guardian";
   return (live(store, "role") as unknown as ClientPartyRole[])
-    .filter((r) => r.partyId === ctx.partyId && r.role === wanted && !r.deleted)
+    .filter(
+      (r) =>
+        r.partyId === ctx.partyId &&
+        r.role === wanted &&
+        !deletedClientIds.has(r.clientId),
+    )
     .map((r) => r.clientId)
     .sort();
 }
@@ -41,8 +60,13 @@ export function filterShiftFor(
   visibleClients: Id[],
 ): Shift | null {
   if (ctx.audience === "me") {
-    // Return a copy even for "me" to prevent mutation of stored record
-    return { ...shift };
+    // Return a deep copy to prevent mutation of stored record
+    return {
+      ...shift,
+      participants: shift.participants.map((p) => ({ ...p })),
+      tags: [...shift.tags],
+      customFields: { ...shift.customFields },
+    };
   }
 
   if (!ctx.partyId) return null;
@@ -70,7 +94,10 @@ export function filterShiftFor(
     return p;
   });
 
-  // Build from explicit allow-list only
+  // Build from explicit allow-list only. Never include isIncident — we cannot
+  // honestly derive it from visible participants (it applies to the whole shift).
+  // Type assertion through unknown is required because the Shift interface requires isIncident,
+  // but including it would leak whether any participant (including hidden ones) had an incident.
   return {
     id: shift.id,
     occurredAt: shift.occurredAt,
@@ -79,11 +106,11 @@ export function filterShiftFor(
     startAt: minInAt,
     endAt: maxOutAt,
     participants: filteredParticipants,
-    isIncident: false, // Never expose incidents to non-me audience
-    reimbursementStatus: shift.reimbursementStatus,
+    reimbursementStatus: "unclaimed",
+    deleted: shift.deleted,
     tags: [],
     customFields: {},
-  };
+  } as unknown as Shift;
 }
 
 /** Rebuilds an expense containing only the audience's own splits, or null.
@@ -97,8 +124,14 @@ export function filterExpenseFor(
   visibleClients: Id[],
 ): Expense | null {
   if (ctx.audience === "me") {
-    // Return a copy even for "me" to prevent mutation of stored record
-    return { ...expense };
+    // Return a deep copy to prevent mutation of stored record
+    return {
+      ...expense,
+      splits: expense.splits.map((s) => ({ ...s })),
+      receiptAttachmentIds: [...expense.receiptAttachmentIds],
+      tags: [...expense.tags],
+      customFields: { ...expense.customFields },
+    };
   }
 
   if (!ctx.partyId) return null;
@@ -112,9 +145,28 @@ export function filterExpenseFor(
   });
   if (splits.length === 0) return null;
 
+  // Strip payerPartyId from guardian splits
+  const filteredSplits = splits.map((s) => {
+    if (ctx.audience === "guardian") {
+      const { payerPartyId: _payerPartyId, ...rest } = s;
+      return rest as typeof s;
+    }
+    return s;
+  });
+
   const totalAmount = splits.reduce((t, s) => t + s.amount, 0);
 
-  // Build from explicit allow-list only
+  // Only include receiptAttachmentIds and description if the expense has exactly
+  // one split and that split belongs to this audience. A shared receipt photographs
+  // the whole bill, and description is free text that can name another child.
+  const isSingleSplit = expense.splits.length === 1 && splits.length === 1;
+  const description = isSingleSplit ? expense.description : "";
+  const receiptAttachmentIds = isSingleSplit ? expense.receiptAttachmentIds : [];
+
+  // Build from explicit allow-list only. Do not include reimbursementStatus —
+  // it is whole-record and leaks whether the other payer submitted a claim.
+  // Type assertion through unknown is required because the Expense interface
+  // requires reimbursementStatus, but including it violates spec §7.1 scoping.
   return {
     id: expense.id,
     occurredAt: expense.occurredAt,
@@ -122,34 +174,43 @@ export function filterExpenseFor(
     zone: expense.zone,
     totalAmount,
     category: expense.category,
-    description: "", // Never expose free-text description to non-me audience
-    receiptAttachmentIds: [], // Never expose shared receipts to non-me audience
-    splits,
-    reimbursementStatus: expense.reimbursementStatus,
+    description,
+    receiptAttachmentIds,
+    splits: filteredSplits,
+    deleted: expense.deleted,
     tags: [],
     customFields: {},
-  };
+  } as unknown as Expense;
 }
 
 /** Returns only notes whose visibility flag matches the audience AND whose
- * attachedToId is a record the audience can see.
+ * clientId is in visibleClients AND whose attachedToId is in visibleRecordIds.
  *
- * CRITICAL: visibleRecordIds must be all record IDs the audience can see
- * (from prior filtering calls). Passing an incomplete set defeats the guard.
+ * CRITICAL: visibleClients and visibleRecordIds must come from clientsVisibleTo()
+ * and prior filterShiftFor/filterExpenseFor calls on the same context.
+ * Passing incorrect sets defeats the guard.
  */
 export function filterNotesFor(
   notes: Note[],
   ctx: AudienceContext,
+  visibleClients: Id[],
   visibleRecordIds: Id[],
 ): Note[] {
-  if (ctx.audience === "me") return notes;
+  if (ctx.audience === "me") {
+    // Return a copy of the array to prevent mutation by caller
+    return [...notes];
+  }
 
   return notes.filter((n) => {
-    // First gate: must be attached to a record the audience can see
+    // First gate: if the note has a clientId, that client must be visible.
+    // If no clientId, the note is only visible to "me".
+    if (!n.clientId) return false;
+    if (!visibleClients.includes(n.clientId)) return false;
+
+    // Second gate: must be attached to a record the audience can see
     if (!visibleRecordIds.includes(n.attachedToId)) return false;
 
-    // Second gate: visibility flag must be explicitly true (not just truthy)
-    // Fail closed if visibility is missing or not an object
+    // Third gate: visibility object must exist and flag must be explicitly true
     if (!n.visibility) return false;
     if (ctx.audience === "payer") return n.visibility.payer === true;
     if (ctx.audience === "guardian") return n.visibility.guardian === true;

@@ -123,6 +123,7 @@ export interface Note extends BaseRecord {
   body: string;
   attachedToType: string;
   attachedToId: Id;
+  clientId?: Id;
   visibility: NoteVisibility;
 }
 
