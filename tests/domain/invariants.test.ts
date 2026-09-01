@@ -36,7 +36,13 @@ describe("checkExpense", () => {
     const v = checkExpense(expense({ splits: [{ clientId: "c1", payerPartyId: "p1", amount: 1700 }] }));
     expect(v).toHaveLength(1);
     expect(v[0].code).toBe("SPLITS_DO_NOT_SUM");
-    expect(v[0].message).toContain("17.00");
+    expect(v[0].message).toBe("$17.00 of this expense is not assigned to anyone.");
+  });
+
+  it("flags a one-cent discrepancy", () => {
+    const v = checkExpense(expense({ totalAmount: 3400, splits: [{ clientId: "c1", payerPartyId: "p1", amount: 3399 }] }));
+    expect(v).toHaveLength(1);
+    expect(v[0].code).toBe("SPLITS_DO_NOT_SUM");
   });
 
   it("flags over-allocation", () => {
@@ -49,6 +55,7 @@ describe("checkExpense", () => {
       }),
     );
     expect(v[0].code).toBe("SPLITS_DO_NOT_SUM");
+    expect(v[0].message).toBe("$6.00 more than the receipt is assigned out.");
   });
 
   it("flags an expense with no splits at all", () => {
@@ -57,11 +64,11 @@ describe("checkExpense", () => {
 
   it("flags a missing receipt", () => {
     const v = checkExpense(expense({ receiptAttachmentIds: [] }));
-    expect(v.map((x: any) => x.code)).toContain("NO_RECEIPT");
+    expect(v.map((x) => x.code)).toContain("NO_RECEIPT");
   });
 
   it("flags a negative or zero total", () => {
-    expect(checkExpense(expense({ totalAmount: 0, splits: [] })).map((v: any) => v.code)).toContain(
+    expect(checkExpense(expense({ totalAmount: 0, splits: [] })).map((v) => v.code)).toContain(
       "NON_POSITIVE_TOTAL",
     );
   });
@@ -92,6 +99,20 @@ describe("checkTrip", () => {
     expect(v[0].code).toBe("CLAIM_MISMATCH");
   });
 
+  it("flags a negative distance share", () => {
+    const v = checkTrip(
+      trip({ splits: [{ clientId: "c1", payerPartyId: "p1", distanceShare: -12, rateApplied: 67, claimAmount: -804 }] }),
+    );
+    expect(v.map((x) => x.code)).toContain("NEGATIVE_CLAIM");
+  });
+
+  it("flags a negative claim amount", () => {
+    const v = checkTrip(
+      trip({ splits: [{ clientId: "c1", payerPartyId: "p1", distanceShare: 12, rateApplied: 67, claimAmount: -100 }] }),
+    );
+    expect(v.map((x) => x.code)).toContain("NEGATIVE_CLAIM");
+  });
+
   it("allows fuel cost to be recorded alongside a mileage claim without adding it", () => {
     const withFuel = trip({ fuelCostAmount: 4500 });
     expect(checkTrip(withFuel)).toEqual([]);
@@ -101,6 +122,10 @@ describe("checkTrip", () => {
 
   it("skips claim checks on a non-claimable trip", () => {
     expect(checkTrip(trip({ isClaimable: false, splits: [] }))).toEqual([]);
+  });
+
+  it("flags a claimable trip with no splits", () => {
+    expect(checkTrip(trip({ isClaimable: true, splits: [] }))[0].code).toBe("NO_SPLITS");
   });
 });
 
@@ -135,18 +160,48 @@ describe("checkShift", () => {
   });
 
   it("flags an end before the start", () => {
-    expect(checkShift(shift({ endAt: "2026-03-01T20:00:00.000Z" }))[0].code).toBe("END_BEFORE_START");
+    const v = checkShift(shift({ endAt: "2026-03-01T20:00:00.000Z" }));
+    expect(v.map((x) => x.code)).toContain("END_BEFORE_START");
   });
 
   it("flags a participant outside the shift window", () => {
     const s = shift();
     s.participants[0].outAt = "2026-03-02T09:00:00.000Z";
-    expect(checkShift(s).map((v: any) => v.code)).toContain("PARTICIPANT_OUTSIDE_SHIFT");
+    expect(checkShift(s).map((v) => v.code)).toContain("PARTICIPANT_OUTSIDE_SHIFT");
   });
 
   it("flags a still-running shift as not submittable but not invalid", () => {
     const v = checkShift(shift({ endAt: undefined }));
-    expect(v.map((x: any) => x.code)).toContain("STILL_RUNNING");
+    expect(v.map((x) => x.code)).toContain("STILL_RUNNING");
+  });
+
+  it("flags a still-running shift with endAt: null", () => {
+    const v = checkShift(shift({ endAt: null }));
+    expect(v.map((x) => x.code)).toContain("STILL_RUNNING");
+  });
+
+  it("flags a bad timestamp in startAt", () => {
+    const v = checkShift(shift({ startAt: "not-a-date" }));
+    expect(v.map((x) => x.code)).toContain("BAD_TIMESTAMP");
+  });
+
+  it("flags a bad timestamp in endAt", () => {
+    const v = checkShift(shift({ endAt: "not-a-date" }));
+    expect(v.map((x) => x.code)).toContain("BAD_TIMESTAMP");
+  });
+
+  it("flags a bad timestamp in participant inAt", () => {
+    const s = shift();
+    s.participants[0].inAt = "not-a-date";
+    const v = checkShift(s);
+    expect(v.map((x) => x.code)).toContain("BAD_TIMESTAMP");
+  });
+
+  it("flags a bad timestamp in participant outAt", () => {
+    const s = shift();
+    s.participants[0].outAt = "not-a-date";
+    const v = checkShift(s);
+    expect(v.map((x) => x.code)).toContain("BAD_TIMESTAMP");
   });
 });
 

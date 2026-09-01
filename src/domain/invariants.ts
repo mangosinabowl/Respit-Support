@@ -13,6 +13,11 @@ function dollars(cents: Money): string {
   return `${sign}${Math.floor(abs / 100)}.${String(abs % 100).padStart(2, "0")}`;
 }
 
+function isValidTimestamp(timestamp: string): boolean {
+  const parsed = Date.parse(timestamp);
+  return !isNaN(parsed);
+}
+
 export function checkExpense(expense: Expense): Violation[] {
   const violations: Violation[] = [];
 
@@ -27,7 +32,7 @@ export function checkExpense(expense: Expense): Violation[] {
   if (expense.splits.length === 0) {
     violations.push({
       code: "NO_SPLITS",
-      message: "Nobody is assigned to pay this back.",
+      message: `$${dollars(expense.totalAmount)} is not assigned to anyone.`,
       field: "splits",
     });
   } else {
@@ -69,6 +74,15 @@ export function checkTrip(trip: Trip): Violation[] {
   }
 
   for (const s of trip.splits) {
+    if (s.distanceShare < 0 || s.claimAmount < 0) {
+      violations.push({
+        code: "NEGATIVE_CLAIM",
+        message: `A trip claim cannot be negative.`,
+        field: "splits",
+      });
+      continue;
+    }
+
     const expected = Math.round(s.distanceShare * s.rateApplied);
     if (s.claimAmount !== expected) {
       violations.push({
@@ -102,6 +116,24 @@ export function checkShift(shift: Shift): Violation[] {
     return violations;
   }
 
+  if (!isValidTimestamp(shift.startAt)) {
+    violations.push({
+      code: "BAD_TIMESTAMP",
+      message: "The shift start time is not a valid timestamp.",
+      field: "startAt",
+    });
+    return violations;
+  }
+
+  if (!isValidTimestamp(shift.endAt)) {
+    violations.push({
+      code: "BAD_TIMESTAMP",
+      message: "The shift end time is not a valid timestamp.",
+      field: "endAt",
+    });
+    return violations;
+  }
+
   if (Date.parse(shift.endAt) < Date.parse(shift.startAt)) {
     violations.push({
       code: "END_BEFORE_START",
@@ -111,13 +143,31 @@ export function checkShift(shift: Shift): Violation[] {
   }
 
   for (const p of shift.participants) {
+    if (!isValidTimestamp(p.inAt)) {
+      violations.push({
+        code: "BAD_TIMESTAMP",
+        message: `Participant ${p.clientId} has an invalid in-time.`,
+        field: "participants",
+      });
+      continue;
+    }
+
+    if (!isValidTimestamp(p.outAt)) {
+      violations.push({
+        code: "BAD_TIMESTAMP",
+        message: `Participant ${p.clientId} has an invalid out-time.`,
+        field: "participants",
+      });
+      continue;
+    }
+
     if (
       Date.parse(p.inAt) < Date.parse(shift.startAt) ||
       Date.parse(p.outAt) > Date.parse(shift.endAt)
     ) {
       violations.push({
         code: "PARTICIPANT_OUTSIDE_SHIFT",
-        message: "Someone's times fall outside the shift.",
+        message: `Participant ${p.clientId}'s times fall outside the shift.`,
         field: "participants",
       });
     }
