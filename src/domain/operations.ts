@@ -70,6 +70,7 @@ export function splitShiftAt(
   at: string,
   deviceId: Id,
   startSeq: number,
+  attachedExpenses: Expense[] = [],
 ): DomainEvent[] {
   // Validate the split point before anything else: Date.parse of a bad
   // string is NaN, and every comparison against NaN is false, so an
@@ -96,14 +97,24 @@ export function splitShiftAt(
   const firstId = newId();
   const secondId = newId();
 
-  return [
+  const events = [
     makeEvent("shift", firstId, { ...shift, id: firstId, startAt: shift.startAt, endAt: at, occurredAt: shift.startAt, participants: clamp(shift.startAt, at) }, deviceId, startSeq),
     makeEvent("shift", secondId, { ...shift, id: secondId, startAt: at, endAt: shift.endAt, occurredAt: at, participants: clamp(at, shift.endAt) }, deviceId, startSeq + 1),
     makeEvent("shift", shift.id, { deleted: true, splitInto: [firstId, secondId] }, deviceId, startSeq + 2),
   ];
+
+  // Without this the receipts attached to the shift keep pointing at a record
+  // that no longer exists, and drop off both halves of the claim. Route each
+  // by when it actually happened; anything before the split belongs to the
+  // first half.
+  attachedExpenses.forEach((e, i) => {
+    const half = Date.parse(e.occurredAt) < Date.parse(at) ? firstId : secondId;
+    events.push(makeEvent("expense", e.id, { shiftId: half }, deviceId, startSeq + 3 + i));
+  });
+  return events;
 }
 
-export function mergeShifts(a: Shift, b: Shift, deviceId: Id, startSeq: number): DomainEvent[] {
+export function mergeShifts(a: Shift, b: Shift, deviceId: Id, startSeq: number, attachedExpenses: Expense[] = []): DomainEvent[] {
   for (const s of [a, b]) {
     assertUnclaimed(s.reimbursementStatus, "a shift");
   }
@@ -117,7 +128,7 @@ export function mergeShifts(a: Shift, b: Shift, deviceId: Id, startSeq: number):
   const participants = unionParticipants(a.participants, b.participants);
   const mergedId = newId();
 
-  return [
+  const events = [
     makeEvent("shift", mergedId, {
       ...a,
       id: mergedId,
@@ -136,6 +147,13 @@ export function mergeShifts(a: Shift, b: Shift, deviceId: Id, startSeq: number):
     makeEvent("shift", a.id, { deleted: true, mergedInto: mergedId }, deviceId, startSeq + 1),
     makeEvent("shift", b.id, { deleted: true, mergedInto: mergedId }, deviceId, startSeq + 2),
   ];
+
+  // Unambiguous here: everything attached to either original belongs to the
+  // merged shift. Left unmoved, these receipts would point at deleted records.
+  attachedExpenses.forEach((e, i) => {
+    events.push(makeEvent("expense", e.id, { shiftId: mergedId }, deviceId, startSeq + 3 + i));
+  });
+  return events;
 }
 
 export interface ExpensePart {

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import "fake-indexeddb/auto";
 import Dexie from "dexie";
-import { RespiteDb, appendEvent, allEvents, hydrate, nextSeq, deviceId, EventConflictError } from "../../src/store/db";
+import { RespiteDb, appendEvent, allEvents, hydrate, nextSeq, deviceId, EventConflictError, exportEventLog, importEventLog } from "../../src/store/db";
 import { makeEvent } from "../../src/domain/events";
 import { live } from "../../src/domain/replay";
 
@@ -421,5 +421,53 @@ describe("db", () => {
     await appendEvent(migrated, cleanCopy);
     expect((await allEvents(migrated)).length).toBe(before);
     await migrated.close();
+  });
+});
+
+describe("event log backup", () => {
+  it("round-trips a log into an empty database", async () => {
+    const a = new RespiteDb(`exp-${Math.random()}`); await a.open();
+    await appendEvent(a, makeEvent("client", "c1", { name: "Rory" }, "dev-a", 1));
+    await appendEvent(a, makeEvent("shift", "s1", { minutes: 120 }, "dev-a", 2));
+    const json = await exportEventLog(a);
+
+    const b = new RespiteDb(`imp-${Math.random()}`); await b.open();
+    const res = await importEventLog(b, json);
+    expect(res).toEqual({ imported: 2, skipped: 0, conflicts: [] });
+    // The restored database must replay to the same state, not merely hold rows.
+    expect(await hydrate(b)).toEqual(await hydrate(a));
+    await a.close(); await b.close();
+  });
+
+  it("is idempotent: restoring the same file twice changes nothing", async () => {
+    const a = new RespiteDb(`exp2-${Math.random()}`); await a.open();
+    await appendEvent(a, makeEvent("client", "c1", { name: "Rory" }, "dev-a", 1));
+    const json = await exportEventLog(a);
+    const b = new RespiteDb(`imp2-${Math.random()}`); await b.open();
+    await importEventLog(b, json);
+    const second = await importEventLog(b, json);
+    expect(second).toEqual({ imported: 0, skipped: 1, conflicts: [] });
+    expect((await allEvents(b)).length).toBe(1);
+    await a.close(); await b.close();
+  });
+
+  it("collects conflicts instead of aborting the whole restore", async () => {
+    const b = new RespiteDb(`imp3-${Math.random()}`); await b.open();
+    const good = makeEvent("client", "c1", { name: "Rory" }, "dev-a", 1);
+    await appendEvent(b, good);
+    // Same eventId, different content: a genuine conflict, not a duplicate.
+    const clash = { ...good, fields: { name: "Someone else" } };
+    const alsoGood = makeEvent("client", "c2", { name: "Sam" }, "dev-a", 2);
+    const json = JSON.stringify({ events: [clash, alsoGood] });
+    const res = await importEventLog(b, json);
+    expect(res.conflicts.map((e) => e.eventId)).toEqual([good.eventId]);
+    expect(res.imported).toBe(1); // the good one still landed
+    await b.close();
+  });
+
+  it("rejects a file that is not an event log", async () => {
+    const b = new RespiteDb(`imp4-${Math.random()}`); await b.open();
+    await expect(importEventLog(b, JSON.stringify({ client: [] }))).rejects.toThrow(/not a respite event log/i);
+    await b.close();
   });
 });

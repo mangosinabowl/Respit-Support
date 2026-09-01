@@ -191,3 +191,35 @@ function deepEqual(a: unknown, b: unknown): boolean {
 
   return aKeys.every((k) => deepEqual(aObj[k], bObj[k]));
 }
+
+/** The whole event log as JSON. Unlike the entity snapshot, this can be restored. */
+export async function exportEventLog(db: RespiteDb): Promise<string> {
+  return JSON.stringify({ version: 1, kind: "respite-event-log", exportedAt: new Date().toISOString(), events: await allEvents(db) }, null, 2);
+}
+
+export interface RestoreResult { imported: number; skipped: number; conflicts: DomainEvent[] }
+
+/**
+ * Restores an exported log. Identical re-delivery is skipped, genuine conflicts
+ * are collected rather than aborting the import, so one bad event cannot cost
+ * the user the rest of the restore.
+ */
+export async function importEventLog(db: RespiteDb, json: string): Promise<RestoreResult> {
+  const parsed = JSON.parse(json);
+  const events: DomainEvent[] = parsed?.events;
+  if (!Array.isArray(events)) throw new Error("Not a respite event log: no events array.");
+
+  const result: RestoreResult = { imported: 0, skipped: 0, conflicts: [] };
+  for (const event of events) {
+    const before = await db.events.get(event.eventId);
+    try {
+      await appendEvent(db, event);
+      if (before) result.skipped += 1;
+      else result.imported += 1;
+    } catch (err) {
+      if (err instanceof EventConflictError) result.conflicts.push(event);
+      else throw err;
+    }
+  }
+  return result;
+}

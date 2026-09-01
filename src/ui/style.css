@@ -1,0 +1,32 @@
+:root{--bg:#f6f7f9;--card:#fff;--ink:#15181d;--muted:#6b7280;--line:#e5e7eb;--accent:#1f6feb;--live:#0b8457}
+@media(prefers-color-scheme:dark){:root{--bg:#0d1117;--card:#161b22;--ink:#e6edf3;--muted:#8b949e;--line:#30363d;--accent:#4c8dff;--live:#2ea043}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}
+#app{max-width:640px;margin:0 auto;padding:16px 16px 48px}
+header{display:flex;align-items:baseline;justify-content:space-between;margin:8px 0 20px}
+h1{font-size:20px;margin:0}
+.dev{color:var(--muted);font-size:12px}
+h2{font-size:14px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:0 0 12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:14px}
+.card.live{border-color:var(--live);border-width:2px}
+.big{font-size:26px;font-weight:600;margin:0 0 4px}
+.who{color:var(--muted);margin:0 0 14px}
+button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:11px 16px;font-size:15px;font-weight:500;cursor:pointer}
+button:hover{filter:brightness(1.08)}
+.primary{width:100%;padding:14px;font-size:16px}
+input,select{background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:11px;font-size:15px;width:100%}
+label{display:block;font-size:13px;color:var(--muted);margin:10px 0 4px}
+.row{display:flex;gap:8px;margin-top:10px}
+.row input{flex:1}
+.row button{flex-shrink:0}
+.list{list-style:none;padding:0;margin:0}
+.list li{padding:9px 0;border-bottom:1px solid var(--line)}
+.list li:last-child{border-bottom:0}
+.empty{color:var(--muted);font-style:italic}
+table{width:100%;border-collapse:collapse;font-size:15px}
+th{text-align:left;font-size:12px;text-transform:uppercase;color:var(--muted);font-weight:500;padding-bottom:8px}
+td{padding:8px 0;border-top:1px solid var(--line)}
+.n{text-align:right;font-variant-numeric:tabular-nums}
+.file{display:inline-block;background:var(--accent);color:#fff;border-radius:8px;padding:11px 16px;font-size:15px;cursor:pointer;margin:0}
+.msg{color:var(--live);font-size:14px;margin:10px 0 0;min-height:1em}
+pre{white-space:pre-wrap;color:#e5534b}
