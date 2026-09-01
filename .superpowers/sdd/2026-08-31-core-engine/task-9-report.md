@@ -265,12 +265,12 @@ export type FilteredExpense = Omit<Expense, "reimbursementStatus">;
 
 - `filterShiftFor` returns `Shift | FilteredShift | null` (Shift for me, FilteredShift for others)
 - `filterExpenseFor` returns `Expense | FilteredExpense | null` (Expense for me, FilteredExpense for others)
-- **No more type assertions** — compile errors replace undefined-at-runtime behavior
+- **No `as unknown as` on the return types** — compile errors replace undefined-at-runtime behavior. (Six `as` assertions remain in the module, including the two pre-existing `ClientPartyRole` casts; none is on a return type.)
 - Test type annotations updated to accept the filtered types
 
 ### 2. **Running Shift Collapse**
 
-**Problem:** `endAt` was set to `startAt` when visible participants had no `outAt`. A child collected at 23:00 during an open shift showed `endAt: 23:00`, not `endAt: null`, masking that the shift was still running.
+**Problem:** `endAt` was set to `startAt` when visible participants had no `outAt`, presenting a running shift as zero-duration. (Note: `endAt: 23:00` for a child collected at 23:00 during an open shift is the CORRECT result, not a bug — see the rule below.)
 
 **Fix:** `endAt` is now:
 - `null` when any visible participant is still present (no `outAt`)
