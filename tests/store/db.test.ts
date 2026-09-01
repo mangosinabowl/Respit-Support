@@ -7,6 +7,34 @@ import { live } from "../../src/domain/replay";
 
 let db: RespiteDb;
 
+/** A working localStorage backed by a Map. */
+function mapStorage(store: Map<string, string>) {
+  return {
+    getItem: (k: string) => (store.has(k) ? store.get(k)! : null),
+    setItem: (k: string, v: string) => { store.set(k, v); },
+  };
+}
+
+/** Runs fn with globalThis.localStorage swapped (undefined = absent), then restores. */
+function withLocalStorage<T>(stub: unknown, fn: () => T): T {
+  const had = "localStorage" in globalThis;
+  const prev = (globalThis as Record<string, unknown>).localStorage;
+  if (stub === undefined) {
+    delete (globalThis as Record<string, unknown>).localStorage;
+  } else {
+    Object.defineProperty(globalThis, "localStorage", { value: stub, configurable: true, writable: true });
+  }
+  try {
+    return fn();
+  } finally {
+    if (had) {
+      Object.defineProperty(globalThis, "localStorage", { value: prev, configurable: true, writable: true });
+    } else {
+      delete (globalThis as Record<string, unknown>).localStorage;
+    }
+  }
+}
+
 beforeEach(async () => {
   db = new RespiteDb(`test-${Math.random()}`);
   await db.open();
@@ -147,9 +175,9 @@ describe("db", () => {
   it("migration: old v1 database with duplicate (deviceId, seq) opens and deduplicates", async () => {
     // Create a v1-shaped database with duplicates
     const oldDb = new Dexie(`migrate-v1-${Math.random()}`) as any;
+    // The genuinely shipped v1 (commit fce5c0d) had NO seqs table.
     oldDb.version(1).stores({
       events: "eventId, entityType, entityId, recordedAt, deviceId, [deviceId+seq]",
-      seqs: "deviceId",
     });
     await oldDb.open();
 
@@ -202,9 +230,9 @@ describe("db", () => {
 
   it("migration: clean v1 database (no duplicates) migrates without changes", async () => {
     const oldDb = new Dexie(`migrate-clean-${Math.random()}`) as any;
+    // The genuinely shipped v1 (commit fce5c0d) had NO seqs table.
     oldDb.version(1).stores({
       events: "eventId, entityType, entityId, recordedAt, deviceId, [deviceId+seq]",
-      seqs: "deviceId",
     });
     await oldDb.open();
 
@@ -237,9 +265,9 @@ describe("db", () => {
   it("counter seeds above renumbered maximum after migration", async () => {
     // Create v1 with duplicates
     const oldDb = new Dexie(`migrate-counter-${Math.random()}`) as any;
+    // The genuinely shipped v1 (commit fce5c0d) had NO seqs table.
     oldDb.version(1).stores({
       events: "eventId, entityType, entityId, recordedAt, deviceId, [deviceId+seq]",
-      seqs: "deviceId",
     });
     await oldDb.open();
 
@@ -254,28 +282,144 @@ describe("db", () => {
     await newDb.open();
 
     // nextSeq should seed from the maximum renumbered seq
+    // Pairs resolve to dev-a:1,2 so the only correct answer is 3.
+    // toBeGreaterThan(1) also accepts 2 - exactly what seeding from the
+    // PRE-renumber maximum returns, i.e. the bug this test is named for.
     const next = await nextSeq(newDb, "dev-a");
-    expect(next).toBeGreaterThan(1);
+    expect(next).toBe(3);
 
     await newDb.close();
   });
 
-  it("appendEvent only catches ConstraintError, not other errors", async () => {
-    // This test ensures we're not swallowing unexpected errors
-    // We can't easily inject other errors without mocking, so we verify the logic
-    // by confirming that ConstraintError is handled but others would pass through
+  it("propagates non-ConstraintError failures unchanged", async () => {
+    // Inject a failure at the write itself while the table stays readable, so the
+    // error cannot be re-thrown incidentally by the follow-up lookup. A closed
+    // database would not distinguish: its lookup throws the same error anyway.
+    class DiskFullError extends Error {}
     const e = makeEvent("client", "c1", { name: "Test" }, "dev-a", 1);
-    await appendEvent(db, e);
+    const realAdd = db.events.add.bind(db.events);
+    db.events.add = (() => Promise.reject(new DiskFullError("disk full"))) as unknown as typeof db.events.add;
 
-    // Trying to append a duplicate should throw ConstraintError (and be handled)
-    const e2 = { ...e, fields: { name: "Modified" } };
-    await expect(appendEvent(db, e2)).rejects.toThrow(EventConflictError);
+    let caught: unknown;
+    try {
+      await appendEvent(db, e);
+    } catch (err) {
+      caught = err;
+    } finally {
+      db.events.add = realAdd;
+    }
+    // Must reach the caller untouched: neither swallowed nor rewritten as a conflict.
+    expect(caught).toBeInstanceOf(DiskFullError);
+    expect(caught).not.toBeInstanceOf(EventConflictError);
   });
 
-  it("deviceId handles empty string from localStorage as absent", async () => {
-    // This test verifies the check treats empty string as absent
-    // In Node.js we can't easily mock this, but we verify the check exists in code
-    const id1 = deviceId();
-    expect(id1.length).toBeGreaterThan(0);
+  it("deviceId regenerates when the stored value is an empty string", () => {
+    const store = new Map<string, string>([["respite.deviceId", ""]]);
+    const id = withLocalStorage(mapStorage(store), () => deviceId());
+    expect(id).not.toBe("");
+    expect(store.get("respite.deviceId")).toBe(id);
+  });
+
+  it("deviceId persists to localStorage and returns it again (happy path)", () => {
+    const store = new Map<string, string>();
+    const stub = mapStorage(store);
+    const first = withLocalStorage(stub, () => deviceId());
+    const second = withLocalStorage(stub, () => deviceId());
+    expect(first).toBe(second);
+    expect(store.get("respite.deviceId")).toBe(first);
+  });
+
+  it("deviceId is stable when localStorage is absent", () => {
+    const a = withLocalStorage(undefined, () => deviceId());
+    const b = withLocalStorage(undefined, () => deviceId());
+    expect(a).toBe(b);
+    expect(a.length).toBeGreaterThan(0);
+  });
+
+  it("deviceId is stable when localStorage getItem throws", () => {
+    const throwing = {
+      getItem() { throw new Error("SecurityError: access denied"); },
+      setItem() { throw new Error("SecurityError: access denied"); },
+    };
+    const a = withLocalStorage(throwing, () => deviceId());
+    const b = withLocalStorage(throwing, () => deviceId());
+    expect(a).toBe(b);
+  });
+
+  it("deviceId is stable when setItem throws (private-browsing quota)", () => {
+    const quota = {
+      getItem: () => null,
+      setItem() { throw new Error("QuotaExceededError"); },
+    };
+    const a = withLocalStorage(quota, () => deviceId());
+    const b = withLocalStorage(quota, () => deviceId());
+    expect(a).toBe(b);
+  });
+
+  it("deviceId is stable when storage accepts writes but does not persist them", () => {
+    // The nastiest mode: nothing throws, so only the read-back check catches it.
+    // Without that check this returns a NEW uuid every call, which makes every
+    // event look like it came from a different device and breaks all ordering.
+    const silent = { getItem: () => null, setItem: () => {} };
+    const ids = [
+      withLocalStorage(silent, () => deviceId()),
+      withLocalStorage(silent, () => deviceId()),
+      withLocalStorage(silent, () => deviceId()),
+    ];
+    expect(new Set(ids).size).toBe(1);
+  });
+
+  it("migration renumbers in recordedAt order, not storage order", async () => {
+    // eventIds are deliberately in the OPPOSITE lexicographic order to recordedAt.
+    // Dexie returns rows in primary-key (eventId) order, so a migration that does
+    // not sort would let "aaa" keep seq 1; sorting by recordedAt gives it to "zzz".
+    const seed = () => [
+      { ...makeEvent("client", "c1", { n: 1 }, "dev-a", 1), eventId: "zzz", recordedAt: "2026-01-01T00:00:00.000Z" },
+      { ...makeEvent("client", "c2", { n: 2 }, "dev-a", 1), eventId: "aaa", recordedAt: "2026-01-01T00:00:01.000Z" },
+      { ...makeEvent("client", "c3", { n: 3 }, "dev-a", 1), eventId: "mmm", recordedAt: "2026-01-01T00:00:02.000Z" },
+    ];
+    const migrateOnce = async () => {
+      const old = new Dexie(`determinism-${Math.random()}`) as any;
+      old.version(1).stores({
+        events: "eventId, entityType, entityId, recordedAt, deviceId, [deviceId+seq]",
+      });
+      await old.open();
+      for (const e of seed()) await old.events.add(e);
+      await old.close();
+      const migrated = new RespiteDb(old.name);
+      await migrated.open();
+      const map = Object.fromEntries((await allEvents(migrated)).map((e) => [e.eventId, e.seq]));
+      await migrated.close();
+      return map;
+    };
+
+    // The earliest-recorded event keeps the original number; later ones move up.
+    expect(await migrateOnce()).toEqual({ zzz: 1, aaa: 2, mmm: 3 });
+    // And two devices migrating copies of the same log must agree, or their
+    // sequence numbers diverge and the merged log is inconsistent.
+    expect(await migrateOnce()).toEqual(await migrateOnce());
+  });
+
+  it("a renumbered event stays idempotent for a clean re-delivery", async () => {
+    const old = new Dexie(`roundtrip-${Math.random()}`) as any;
+    old.version(1).stores({
+      events: "eventId, entityType, entityId, recordedAt, deviceId, [deviceId+seq]",
+    });
+    await old.open();
+    await old.events.add(makeEvent("client", "c1", { name: "Keep" }, "dev-a", 1));
+    await old.events.add({ ...makeEvent("client", "c2", { name: "Moved" }, "dev-a", 1), eventId: "moved" });
+    await old.close();
+
+    const migrated = new RespiteDb(old.name);
+    await migrated.open();
+    const renumbered = (await allEvents(migrated)).find((e) => e.eventId === "moved")!;
+
+    // A JSON round-trip is exactly what an export/import or a sync peer produces.
+    // A stray marker key left on the stored row would make this throw forever.
+    const cleanCopy = JSON.parse(JSON.stringify(renumbered));
+    const before = (await allEvents(migrated)).length;
+    await appendEvent(migrated, cleanCopy);
+    expect((await allEvents(migrated)).length).toBe(before);
+    await migrated.close();
   });
 });

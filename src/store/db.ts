@@ -26,43 +26,49 @@ export class RespiteDb extends Dexie {
 
   constructor(name = "respite-support") {
     super(name);
-    // v1: Original schema shipped to users (non-unique compound index)
+    // v1: the schema as actually shipped (commit fce5c0d) - events only, non-unique.
+    // Never retro-edit a shipped version's declaration: rebuilding an index as
+    // unique over rows that already violate it aborts the whole upgrade transaction.
     this.version(1).stores({
       events: "eventId, entityType, entityId, recordedAt, deviceId, [deviceId+seq]",
-      seqs: "deviceId",
     });
-    // v2: Add seqs table and deduplicate (deviceId, seq) pairs
+    // v2: add the seqs table and renumber duplicate (deviceId, seq) pairs left by v1.
+    // Still non-unique here, so the upgrade can actually run.
     this.version(2)
       .stores({
         events: "eventId, entityType, entityId, recordedAt, deviceId, [deviceId+seq]",
         seqs: "deviceId",
       })
       .upgrade(async (tx) => {
-        // Deduplicate any (deviceId, seq) pairs from v1
-        const allEvents = await tx.table<DomainEvent>("events").toArray();
+        const all = await tx.table<DomainEvent>("events").toArray();
+        // Deterministic order: two devices migrating copies of the same log must
+        // resolve the same events onto the same sequence numbers. toArray() yields
+        // random primary-key (UUID) order, which would not.
+        all.sort((a, b) =>
+          a.recordedAt < b.recordedAt ? -1 :
+          a.recordedAt > b.recordedAt ? 1 :
+          a.eventId < b.eventId ? -1 :
+          a.eventId > b.eventId ? 1 : 0
+        );
+
         const perDeviceMax = new Map<string, number>();
         const seen = new Set<string>();
-        const toUpdate: DomainEvent[] = [];
+        const toRenumber: DomainEvent[] = [];
 
-        // First pass: track max seq per device and identify duplicates
-        for (const event of allEvents) {
+        // First pass: record the true per-device maximum and spot duplicates.
+        for (const event of all) {
           const key = `${event.deviceId}:${event.seq}`;
-          const max = perDeviceMax.get(event.deviceId) ?? 0;
-          perDeviceMax.set(event.deviceId, Math.max(max, event.seq));
-
-          if (seen.has(key)) {
-            // Duplicate found; mark for renumbering
-            toUpdate.push({ ...event, _duplicate: true } as any);
-          }
+          perDeviceMax.set(event.deviceId, Math.max(perDeviceMax.get(event.deviceId) ?? 0, event.seq));
+          if (seen.has(key)) toRenumber.push(event);
           seen.add(key);
         }
 
-        // Second pass: renumber duplicates, tracking updated max
-        for (const event of toUpdate) {
-          const max = perDeviceMax.get(event.deviceId) ?? 0;
-          const newSeq = max + 1;
+        // Second pass: renumber above the running maximum, which is unoccupied by
+        // construction. The first event to claim a pair keeps it; later ones move.
+        for (const event of toRenumber) {
+          const newSeq = (perDeviceMax.get(event.deviceId) ?? 0) + 1;
           perDeviceMax.set(event.deviceId, newSeq);
-          await tx.table<DomainEvent>("events").put({ ...event, seq: newSeq, _duplicate: undefined } as any);
+          await tx.table<DomainEvent>("events").put({ ...event, seq: newSeq });
         }
       });
     // v3: Make (deviceId, seq) unique
