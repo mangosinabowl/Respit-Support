@@ -27,10 +27,12 @@ export function allocateByWeights(
   if (weights.length !== payees.length) {
     throw new Error("allocateByWeights: weights must match payees in length");
   }
+  if (weights.some((w) => w < 0)) {
+    throw new Error("allocateByWeights: weights must not be negative");
+  }
   if (payees.length === 0) return [];
 
-  const totalWeight = weights.reduce((t, w) => t + w, 0);
-  const effective = totalWeight === 0 ? payees.map(() => 1) : weights;
+  const effective = weights.every((w) => w === 0) ? payees.map(() => 1) : weights;
   const effectiveTotal = effective.reduce((t, w) => t + w, 0);
 
   const exact = effective.map((w) => (total * w) / effectiveTotal);

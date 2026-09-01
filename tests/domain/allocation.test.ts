@@ -20,7 +20,7 @@ describe("allocateEvenly", () => {
   });
 
   it("never loses or invents a cent, for any total or party count", () => {
-    for (let total = 0; total <= 500; total++) {
+    for (let total = -500; total <= 500; total++) {
       for (let n = 1; n <= 7; n++) {
         const some = Array.from({ length: n }, (_, i) => ({
           clientId: `c${i}`,
@@ -30,6 +30,12 @@ describe("allocateEvenly", () => {
         expect(sum).toBe(total);
       }
     }
+  });
+
+  it("splits a refund (negative total) without losing or inventing a cent", () => {
+    const splits = allocateEvenly(-3400, payees);
+    expect(splits.map((s) => s.amount)).toEqual([-1133, -1133, -1134]);
+    expect(splits.reduce((t, s) => t + s.amount, 0)).toBe(-3400);
   });
 
   it("is deterministic: the same input always gives the same output", () => {
@@ -64,5 +70,9 @@ describe("allocateByWeights", () => {
 
   it("throws when weights do not match payees", () => {
     expect(() => allocateByWeights(3000, payees, [1, 1])).toThrow(/weights/i);
+  });
+
+  it("throws when any weight is negative", () => {
+    expect(() => allocateByWeights(3000, payees, [-1, 1, 1])).toThrow(/negative/i);
   });
 });
