@@ -780,3 +780,27 @@ describe("Fix Round 4 edge cases", () => {
     expect(filtered.receiptAttachmentIds).toEqual([]);
   });
 });
+
+  it("returns endAt as maximum visible outAt even when the shift is still open", () => {
+    const openShift: Shift = {
+      id: "s6",
+      occurredAt: "2026-03-01T22:00:00.000Z",
+      recordedAt: "2026-03-01T22:00:00.000Z",
+      zone: "UTC",
+      startAt: "2026-03-01T22:00:00.000Z",
+      endAt: null,
+      participants: [
+        { clientId: "rory", payerPartyId: "agencyA", inAt: "2026-03-01T22:00:00.000Z", outAt: "2026-03-02T00:00:00.000Z", payRate: 3000, timeRule: "fullPerPayer" },
+        { clientId: "sam", payerPartyId: "familyB", inAt: "2026-03-01T22:30:00.000Z", outAt: undefined as any, payRate: 2500, timeRule: "fullPerPayer" },
+      ],
+      isIncident: false,
+      reimbursementStatus: "unclaimed",
+      tags: [],
+      customFields: {},
+    };
+    const ctx: AudienceContext = { audience: "payer", partyId: "agencyA" };
+    const visibleClients = clientsVisibleTo(store, ctx);
+    const filtered = filterShiftFor(openShift, ctx, visibleClients)!;
+    expect(filtered.endAt).toBe("2026-03-02T00:00:00.000Z");
+    expect(JSON.stringify(filtered)).not.toContain("sam");
+  });
