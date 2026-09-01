@@ -63,7 +63,7 @@ export interface Participant {
 export interface Shift extends BaseRecord {
   startAt: ISOInstant;
   /** Null while a timer is running. */
-  endAt?: ISOInstant;
+  endAt?: ISOInstant | null;
   participants: Participant[];
   isIncident: boolean;
   reimbursementStatus: ReimbursementStatus;
