@@ -613,3 +613,102 @@ the entry.
 Report: NO Fix Round 2 section was written at all, and all three false sentences survive verbatim
 including the one concealing the still-open Critical. Second task running where the report is the
 repeatedly-missed deliverable.
+
+## Task 10 CLOSED (df3967d) — controller implemented fix round 4 directly
+
+The round-4 implementer died on a usage limit having changed nothing. Rather than cold-start
+another agent for six bounded items, the controller implemented them: removed the _duplicate
+marker (structured clone kept the key even set to undefined, so a clean JSON copy of a renumbered
+event could never be recognised as an identical re-delivery and threw forever — this had to close
+before Task 12 round-trips events through JSON), restored version(1) to the schema as actually
+shipped, sorted by recordedAt before renumbering so two devices migrating copies of the same log
+agree, and replaced three tests that could not fail.
+
+Mutation-verified by the controller, all four KILLED: remove the sort, restore the marker, remove
+the deviceId read-back, swallow all errors. The first attempt at the swallow test used a closed
+database and SURVIVED — the follow-up lookup throws the same error, so it could not distinguish.
+Re-done by injecting a failure at the write while the table stays readable.
+
+Noted and NOT chased: the empty-string deviceId mutant the reviewer reported as surviving is an
+EQUIVALENT mutant. `if (existing)` and `existing !== null && existing !== ""` behave identically
+for every possible string|null input, so no test can distinguish them. A test pinning the
+regenerate-and-persist behaviour was written anyway.
+
+169 tests, tsc clean, zero `as any` in src/store/db.ts.
+
+## Task 11 (b09c632, 8d4cab1) — 182 tests; review dispatched
+
+Implementer flagged, and it is real: moveExpense clears shiftId with an `undefined` field value,
+relying on in-memory object-spread semantics in replay. `undefined` does not survive JSON. Task 12
+is JSON export and Task 10 persists through structured clone. Under review as the first item.
+
+## PLAN GAP found by the controller while reading the Task 12 brief, before building it
+
+exportAll(store) serialises the DERIVED ENTITY SNAPSHOT, not the event log, and there is NO import
+or restore counterpart anywhere in the plan. Three consequences:
+  1. The "safety net" cannot be restored from. Nothing ingests the file back. It is a readable dump,
+     not a recovery path — which is what the worker would actually need after losing a phone.
+  2. Exporting the snapshot discards the append-only log: deviceId/seq ordering, event history, and
+     the ability to merge with another device's log. A restore from it would leave hydrate() empty,
+     because the log is the source of truth, not the snapshot.
+  3. store values include soft-deleted records (live() filters them, exportAll does not), so the
+     file contains deleted: true rows with nothing explaining them.
+Building Task 12 as specified — scope is the user's call, not mine — and carrying this to plan 2.
+
+## Task 11 review — three money defects, all in the BRIEF's design, transcription byte-perfect
+
+UPHOLD C1: mergeShifts concatenates participants with no reconciliation. Duplicate pair (A 15-18
+c1, B 15-18 c1 — literally "two shifts that were really one") gives a 180-minute shift with two
+identical rows billed as 360 min / 18000c. checkShift returns [] so nothing downstream catches it.
+The only merge test uses ADJACENT shifts, so concatenation is pinned but overlap never exercised.
+Ruling: union participant intervals per (clientId, payerPartyId); refuse the merge when the same
+pair appears in both with a different payRate or timeRule, since rates are snapshotted and there is
+no honest way to union rows that disagree about the rate.
+
+UPHOLD C2: splitShiftAt accepts an unparseable `at`. Date.parse -> NaN, every comparison against
+NaN is false, so both window guards pass AND the clamp filter drops everyone. Observed: original
+soft-deleted, both halves zero participants, 9000c -> 0c. A typo destroys a shift's whole claim.
+
+UPHOLD C3: moveExpense clears with undefined. JSON drops the key entirely ("fields":{}), so replay
+of a round-tripped event leaves shiftId pointing at the old shift — the expense silently reattaches
+to the shift it was moved off. Also breaks appendEvent idempotency, since deepEqual compares key
+counts. The brief's own test at :134 asserts toBeUndefined(), so the CORRECT fix (mutant M34) is
+KILLED by the test — the defect is pinned in place and cannot be fixed downstream.
+
+Corrected my own earlier note: the JSON exposure is Task 12's export, NOT src/store/db.ts. Dexie
+uses structured clone, which preserves an undefined-valued key; the reviewer confirmed a real
+IndexedDB put/get still clears correctly. Task 12's implementer independently observed the same
+key vanishing from exportAll, which corroborates it.
+
+18 of 34 mutants SURVIVED. Three cost money: M12 (zero payRate on both halves of every split shift,
+suite stays green — the "rates are snapshotted" constraint has ZERO coverage in this module), M29
+(drop the soft-delete of the original expense and the conservation test still passes, because the
+fixture is never seeded into the store — in reality 3400 + 1200 + 2200 = 6800 claimed on a 3400
+receipt), M27 (parts keep the original's splits). Also unpinned: both running-shift guards, the
+inAt clamp, and three seq-collision mutants that would throw at appendEvent against the unique
+[deviceId+seq] index.
+
+Also ruled: apply the status guard to all four operations, not just mergeShifts (splitting a
+submitted shift currently stamps both halves submitted with the original submissionId while
+soft-deleting the record that was actually submitted). Union tags and customFields on merge.
+
+CARRIED to plan 2, not fixed: split and merge orphan attached expenses (e1.shiftId still points at
+the deleted original). Neither function can fix it — they receive entities, not the store. Needs
+either a signature change or a documented caller contract.
+
+## Task 12 (63fafbc, b6f7d27) — 192 tests; review dispatched
+
+Declared deviation: the brief's live<Shift>(...) does not compile (TS2344 — domain entities lack
+the EntityRecord index signature), so the implementer used the `as unknown as X[]` pattern already
+present in audience.ts. Asked the reviewer whether replay.ts's constraint can be widened to remove
+all five cast sites, as advisory rather than blocking — the casts silence type checking exactly
+where a wrong entity type would be a money bug.
+
+## SYNC — answered for the user: it is plan 3 (UI is plan 2)
+
+Already built for it here: deviceId + per-device seq, compareEvents total ordering with per-field
+LWW, idempotent append by eventId, unique (deviceId, seq), EventConflictError discrimination,
+block reservation. Cross-device merge is already tested.
+Missing: an import path (nothing reads events back in — the export is a snapshot, not the log),
+the Drive API itself, and a conflict quarantine. Flagged to the user that sync could be reordered
+ahead of the UI if data safety matters more than usability, since the engine is ready for either.
