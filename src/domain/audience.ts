@@ -10,6 +10,12 @@ export interface AudienceContext {
   partyId?: Id;
 }
 
+/** Shift filtered for a non-me audience: omits isIncident and reimbursementStatus. */
+export type FilteredShift = Omit<Shift, "isIncident" | "reimbursementStatus">;
+
+/** Expense filtered for a non-me audience: omits reimbursementStatus. */
+export type FilteredExpense = Omit<Expense, "reimbursementStatus">;
+
 /**
  * The clients an audience is allowed to know exist.
  *
@@ -58,7 +64,7 @@ export function filterShiftFor(
   shift: Shift,
   ctx: AudienceContext,
   visibleClients: Id[],
-): Shift | null {
+): Shift | FilteredShift | null {
   if (ctx.audience === "me") {
     // Return a deep copy to prevent mutation of stored record
     return {
@@ -80,10 +86,22 @@ export function filterShiftFor(
   });
   if (participants.length === 0) return null;
 
-  // Narrow the time window to only the visible participants' span
-  const times = participants.flatMap((p) => [p.inAt, p.outAt]);
-  const minInAt = times.reduce((acc, t) => (t < acc ? t : acc));
-  const maxOutAt = times.reduce((acc, t) => (t > acc ? t : acc));
+  // Determine the time window: max outAt of visible participants when all present,
+  // null when any visible participant is still present (no outAt).
+  let endAt: string | null | undefined = null;
+  let hasRunningParticipant = false;
+  for (const p of participants) {
+    if (!p.outAt) {
+      hasRunningParticipant = true;
+      break;
+    }
+  }
+  if (!hasRunningParticipant) {
+    const times = participants.flatMap((p) => [p.inAt, p.outAt]);
+    const minInAt = times.reduce((acc, t) => (t < acc ? t : acc));
+    const maxOutAt = times.reduce((acc, t) => (t > acc ? t : acc));
+    endAt = maxOutAt;
+  }
 
   const filteredParticipants = participants.map((p) => {
     if (ctx.audience === "guardian") {
@@ -94,23 +112,20 @@ export function filterShiftFor(
     return p;
   });
 
-  // Build from explicit allow-list only. Never include isIncident — we cannot
-  // honestly derive it from visible participants (it applies to the whole shift).
-  // Type assertion through unknown is required because the Shift interface requires isIncident,
-  // but including it would leak whether any participant (including hidden ones) had an incident.
+  // Build from explicit allow-list only. Never include isIncident or reimbursementStatus —
+  // both are whole-record and cannot be honestly derived from visible participants.
   return {
     id: shift.id,
     occurredAt: shift.occurredAt,
     recordedAt: shift.recordedAt,
     zone: shift.zone,
-    startAt: minInAt,
-    endAt: maxOutAt,
+    startAt: participants[0].inAt,
+    endAt,
     participants: filteredParticipants,
-    reimbursementStatus: "unclaimed",
     deleted: shift.deleted,
     tags: [],
     customFields: {},
-  } as unknown as Shift;
+  } as FilteredShift;
 }
 
 /** Rebuilds an expense containing only the audience's own splits, or null.
@@ -122,7 +137,7 @@ export function filterExpenseFor(
   expense: Expense,
   ctx: AudienceContext,
   visibleClients: Id[],
-): Expense | null {
+): Expense | FilteredExpense | null {
   if (ctx.audience === "me") {
     // Return a deep copy to prevent mutation of stored record
     return {
@@ -156,17 +171,20 @@ export function filterExpenseFor(
 
   const totalAmount = splits.reduce((t, s) => t + s.amount, 0);
 
-  // Only include receiptAttachmentIds and description if the expense has exactly
-  // one split and that split belongs to this audience. A shared receipt photographs
-  // the whole bill, and description is free text that can name another child.
-  const isSingleSplit = expense.splits.length === 1 && splits.length === 1;
-  const description = isSingleSplit ? expense.description : "";
-  const receiptAttachmentIds = isSingleSplit ? expense.receiptAttachmentIds : [];
+  // Include receiptAttachmentIds and description only when every split in the
+  // expense is visible to this audience. This protects:
+  // - A payer's own receipt when they funded the entire expense
+  // - Against shared-receipt leakage when multiple payers co-funded
+  const allSplitsVisible = expense.splits.every((s) => {
+    if (!visibleClients.includes(s.clientId)) return false;
+    if (ctx.audience === "payer") return ctx.partyId != null && s.payerPartyId === ctx.partyId;
+    return true;
+  });
+  const description = allSplitsVisible ? expense.description : "";
+  const receiptAttachmentIds = allSplitsVisible ? expense.receiptAttachmentIds : [];
 
-  // Build from explicit allow-list only. Do not include reimbursementStatus —
+  // Build from explicit allow-list only. Never include reimbursementStatus —
   // it is whole-record and leaks whether the other payer submitted a claim.
-  // Type assertion through unknown is required because the Expense interface
-  // requires reimbursementStatus, but including it violates spec §7.1 scoping.
   return {
     id: expense.id,
     occurredAt: expense.occurredAt,
@@ -180,7 +198,7 @@ export function filterExpenseFor(
     deleted: expense.deleted,
     tags: [],
     customFields: {},
-  } as unknown as Expense;
+  } as FilteredExpense;
 }
 
 /** Returns only notes whose visibility flag matches the audience AND whose

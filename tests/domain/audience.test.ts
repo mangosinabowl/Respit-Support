@@ -255,6 +255,46 @@ describe("filterShiftFor", () => {
     const filtered = filterShiftFor(mixedShift, ctx, visibleClients)!;
     expect(filtered).toHaveProperty("deleted");
   });
+
+  it("handles running shift (endAt: null): null when any visible participant is still present", () => {
+    const runningShift: Shift = {
+      id: "s3",
+      occurredAt: "2026-03-01T22:00:00.000Z",
+      recordedAt: "2026-03-01T22:00:00.000Z",
+      zone: "UTC",
+      startAt: "2026-03-01T22:00:00.000Z",
+      endAt: null,
+      participants: [
+        { clientId: "rory", payerPartyId: "agencyA", inAt: "2026-03-01T22:00:00.000Z", outAt: undefined as any, payRate: 3000, timeRule: "fullPerPayer" },
+      ],
+      isIncident: false,
+      reimbursementStatus: "unclaimed",
+      tags: [],
+      customFields: {},
+    };
+    const ctx: AudienceContext = { audience: "payer", partyId: "agencyA" };
+    const visibleClients = clientsVisibleTo(store, ctx);
+    const filtered = filterShiftFor(runningShift, ctx, visibleClients)!;
+    expect(filtered.endAt).toBeNull();
+  });
+
+  it("does not expose reimbursementStatus to non-me audience", () => {
+    const ctx: AudienceContext = { audience: "payer", partyId: "agencyA" };
+    const visibleClients = clientsVisibleTo(store, ctx);
+    const filtered = filterShiftFor(mixedShift, ctx, visibleClients)!;
+    expect(filtered).not.toHaveProperty("reimbursementStatus");
+  });
+
+  it("does not include submissionId in non-me shift", () => {
+    const shiftWithSubmissionId: Shift = {
+      ...mixedShift,
+      submissionId: "sub-123",
+    };
+    const ctx: AudienceContext = { audience: "payer", partyId: "agencyA" };
+    const visibleClients = clientsVisibleTo(store, ctx);
+    const filtered = filterShiftFor(shiftWithSubmissionId, ctx, visibleClients)!;
+    expect(JSON.stringify(filtered)).not.toContain("sub-123");
+  });
 });
 
 describe("filterExpenseFor", () => {
@@ -353,6 +393,38 @@ describe("filterExpenseFor", () => {
     const visibleClients = clientsVisibleTo(store, ctx);
     const filtered = filterExpenseFor(sharedReceiptExpense, ctx, visibleClients)!;
     expect(filtered).toHaveProperty("deleted");
+  });
+
+  it("includes receiptAttachmentIds and description for same-payer multi-split", () => {
+    const samPayerMultiSplit: Expense = {
+      id: "e3",
+      occurredAt: "2026-03-01T23:00:00.000Z",
+      recordedAt: "2026-03-01T23:00:00.000Z",
+      zone: "UTC",
+      totalAmount: 3400,
+      category: "food",
+      description: "Lunch for Rory and Charlie",
+      receiptAttachmentIds: ["a1"],
+      splits: [
+        { clientId: "rory", payerPartyId: "agencyA", amount: 1700 },
+        { clientId: "charlie", payerPartyId: "agencyA", amount: 1700 },
+      ],
+      reimbursementStatus: "unclaimed",
+      tags: [],
+      customFields: {},
+    };
+    const ctx: AudienceContext = { audience: "payer", partyId: "agencyA" };
+    const visibleClients = ["rory", "charlie"];
+    const filtered = filterExpenseFor(samPayerMultiSplit, ctx, visibleClients)!;
+    expect(filtered.description).toBe("Lunch for Rory and Charlie");
+    expect(filtered.receiptAttachmentIds).toEqual(["a1"]);
+  });
+
+  it("does not expose reimbursementStatus to non-me audience", () => {
+    const ctx: AudienceContext = { audience: "payer", partyId: "agencyA" };
+    const visibleClients = clientsVisibleTo(store, ctx);
+    const filtered = filterExpenseFor(sharedReceiptExpense, ctx, visibleClients)!;
+    expect(filtered).not.toHaveProperty("reimbursementStatus");
   });
 });
 
