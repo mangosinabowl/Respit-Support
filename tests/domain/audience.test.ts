@@ -708,3 +708,75 @@ describe("Leak check: two-family shift with metadata and cross-family notes", ()
     expect(filtered.some((n) => n.body.includes("meltdown"))).toBe(false);
   });
 });
+
+describe("Fix Round 4 edge cases", () => {
+  it("uses minimum inAt when participants are out of array order", () => {
+    const outOfOrderShift: Shift = {
+      id: "s4",
+      occurredAt: "2026-03-01T20:00:00.000Z",
+      recordedAt: "2026-03-01T20:00:00.000Z",
+      zone: "UTC",
+      startAt: "2026-03-01T20:00:00.000Z",
+      endAt: "2026-03-02T02:00:00.000Z",
+      participants: [
+        { clientId: "rory", payerPartyId: "agencyA", inAt: "2026-03-01T23:00:00.000Z", outAt: "2026-03-02T01:00:00.000Z", payRate: 3000, timeRule: "fullPerPayer" },
+        { clientId: "charlie", payerPartyId: "agencyA", inAt: "2026-03-01T21:00:00.000Z", outAt: "2026-03-02T02:00:00.000Z", payRate: 3000, timeRule: "fullPerPayer" },
+      ],
+      isIncident: false,
+      reimbursementStatus: "unclaimed",
+      tags: [],
+      customFields: {},
+    };
+    const ctx: AudienceContext = { audience: "payer", partyId: "agencyA" };
+    const visibleClients = ["rory", "charlie"];
+    const filtered = filterShiftFor(outOfOrderShift, ctx, visibleClients)!;
+    expect(filtered.startAt).toBe("2026-03-01T21:00:00.000Z");
+  });
+
+  it("returns endAt as maximum visible outAt when shift is closed", () => {
+    const closedShift: Shift = {
+      id: "s5",
+      occurredAt: "2026-03-01T22:00:00.000Z",
+      recordedAt: "2026-03-01T22:00:00.000Z",
+      zone: "UTC",
+      startAt: "2026-03-01T22:00:00.000Z",
+      endAt: "2026-03-02T02:00:00.000Z",
+      participants: [
+        { clientId: "rory", payerPartyId: "agencyA", inAt: "2026-03-01T22:00:00.000Z", outAt: "2026-03-02T01:00:00.000Z", payRate: 3000, timeRule: "fullPerPayer" },
+        { clientId: "charlie", payerPartyId: "agencyA", inAt: "2026-03-01T22:30:00.000Z", outAt: "2026-03-02T02:00:00.000Z", payRate: 3000, timeRule: "fullPerPayer" },
+      ],
+      isIncident: false,
+      reimbursementStatus: "unclaimed",
+      tags: [],
+      customFields: {},
+    };
+    const ctx: AudienceContext = { audience: "payer", partyId: "agencyA" };
+    const visibleClients = ["rory", "charlie"];
+    const filtered = filterShiftFor(closedShift, ctx, visibleClients)!;
+    expect(filtered.endAt).toBe("2026-03-02T02:00:00.000Z");
+  });
+
+  it("respects payer-identity in allSplitsVisible for co-funded child", () => {
+    const coFundedExpense: Expense = {
+      id: "e4",
+      occurredAt: "2026-03-01T23:00:00.000Z",
+      recordedAt: "2026-03-01T23:00:00.000Z",
+      zone: "UTC",
+      totalAmount: 3400,
+      category: "food",
+      description: "Shared meal for Rory",
+      receiptAttachmentIds: ["a1"],
+      splits: [
+        { clientId: "rory", payerPartyId: "agencyA", amount: 1700 },
+        { clientId: "rory", payerPartyId: "familyB", amount: 1700 },
+      ],
+      reimbursementStatus: "unclaimed",
+      tags: [],
+      customFields: {},
+    };
+    const ctx: AudienceContext = { audience: "payer", partyId: "agencyA" };
+    const filtered = filterExpenseFor(coFundedExpense, ctx, ["rory"])!;
+    expect(filtered.description).toBe("");
+    expect(filtered.receiptAttachmentIds).toEqual([]);
+  });
+});

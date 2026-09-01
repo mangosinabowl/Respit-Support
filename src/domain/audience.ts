@@ -86,8 +86,13 @@ export function filterShiftFor(
   });
   if (participants.length === 0) return null;
 
-  // Determine the time window: max outAt of visible participants when all present,
-  // null when any visible participant is still present (no outAt).
+  // Determine the time window: min inAt and max outAt of visible participants when all present,
+  // null endAt when any visible participant is still present (no outAt).
+  const times = participants.flatMap((p) => [p.inAt, p.outAt]);
+  const minInAt = times.reduce((acc, t) => (t < acc ? t : acc));
+  let maxOutAt = times.reduce((acc, t) => (t > acc ? t : acc));
+
+  // If any visible participant is still present (no outAt), endAt is null
   let endAt: string | null | undefined = null;
   let hasRunningParticipant = false;
   for (const p of participants) {
@@ -97,9 +102,6 @@ export function filterShiftFor(
     }
   }
   if (!hasRunningParticipant) {
-    const times = participants.flatMap((p) => [p.inAt, p.outAt]);
-    const minInAt = times.reduce((acc, t) => (t < acc ? t : acc));
-    const maxOutAt = times.reduce((acc, t) => (t > acc ? t : acc));
     endAt = maxOutAt;
   }
 
@@ -119,7 +121,7 @@ export function filterShiftFor(
     occurredAt: shift.occurredAt,
     recordedAt: shift.recordedAt,
     zone: shift.zone,
-    startAt: participants[0].inAt,
+    startAt: minInAt,
     endAt,
     participants: filteredParticipants,
     deleted: shift.deleted,
