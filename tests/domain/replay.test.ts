@@ -114,18 +114,13 @@ describe("replay", () => {
     expect(replay(throughJson).client.get("c1")!.colour).toBe("blue");
   });
 
-  it("ignores events with unknown entityType", () => {
-    const eventWithUnknownType = {
-      eventId: "evt-123",
-      entityType: "unknownType" as any,
-      entityId: "x1",
-      fields: { name: "Unknown" },
-      recordedAt: "2026-01-01T00:00:00.000Z",
-      deviceId: "dev-a",
-      seq: 1,
-    };
-    const store = replay([eventWithUnknownType]);
-    // Should not throw, and should not create a bucket for the unknown type
-    expect(store.client.get("x1")).toBeUndefined();
+  it("ignores an event with an unknown entity type without creating a bucket for it", () => {
+    const unknown = {
+      ...ev("x1", { name: "?" }, "2026-01-01T00:00:00.000Z"),
+      entityType: "unknownType" as unknown as "client",
+    } as unknown as DomainEvent;
+    const store = replay([unknown]);
+    expect(Object.keys(store)).not.toContain("unknownType");
+    expect(Object.keys(store)).toHaveLength(12);
   });
 });
