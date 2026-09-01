@@ -34,6 +34,10 @@ export function emptyStore(): EntityStore {
  * Folds an event stream into current state. Pure and order-independent:
  * the events are sorted into a total order first, so any permutation of the
  * same stream produces identical output.
+ *
+ * INVARIANT: events must clear a field by setting it to `null`, never `undefined`.
+ * `undefined` does not survive JSON serialization (events travel as JSONL between devices),
+ * so an event intending to clear a field would silently fail to do so after round-tripping.
  */
 export function replay(events: DomainEvent[]): EntityStore {
   const store = emptyStore();
