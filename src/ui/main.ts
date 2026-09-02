@@ -7,6 +7,7 @@ import { expenseAsMinutes, splitByPercent } from "../domain/expenseTime";
 import { tripShares } from "../domain/mileage";
 import { checkShift, checkExpense, checkTrip, isSubmittable, type Violation } from "../domain/invariants";
 import { shrinkImage, readableSize } from "./photo";
+import { exportAll } from "../domain/backup";
 import { syncOnce } from "../store/sync";
 import { connectDrive, driveRemote } from "../store/googleDrive";
 import { newId, nowInstant } from "../domain/primitives";
@@ -427,7 +428,8 @@ async function render() {
     <section class="card">
       <h2>Backup</h2>
       <p class="sub">A copy you keep yourself, outside Google. Sync already keeps your devices in step — this is for if you lose the last one, or lose the Google account.</p>
-      <div class="row"><button id="exp" class="pink">Download a copy</button><label class="file">Merge a copy back in<input id="imp" type="file" accept="application/json" hidden /></label></div>
+      <div class="row"><button id="exp" class="pink">Download a copy</button><label class="file">Merge a copy back in<input id="imp" type="file" accept="application/json" hidden /></label><button id="expReadable" class="ghost">Readable summary</button></div>
+      <p class="sub">The copy is the event log and is what a merge reads. The readable summary is a plain list of what it all adds up to — for an accountant, not for merging back.</p>
       <p class="sub">Merging only <b>adds</b> what is missing. It never deletes anything, never overwrites newer work, and cannot undo changes made since the copy was taken. Importing the same file twice does nothing the second time.</p>
       <p class="msg">${ui.msg}</p>
     </section>`}
@@ -1146,6 +1148,15 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([await exportEventLog(db)], { type: "application/json" }));
     a.download = `respite-log-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+  };
+
+  if ($("expReadable")) $("expReadable")!.onclick = async () => {
+    // The event log is the thing that can be restored; this is the plain list
+    // of what it adds up to, for an accountant or a payer who wants to read it.
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([exportAll(await hydrate(db))], { type: "application/json" }));
+    a.download = `respite-summary-${new Date().toISOString().slice(0, 10)}.json`;
     a.click();
   };
 
