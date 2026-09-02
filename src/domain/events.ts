@@ -1,18 +1,27 @@
 import { newId, nowInstant, type Id, type ISOInstant } from "./primitives";
 
-export type EntityType =
-  | "party"
-  | "client"
-  | "role"
-  | "shift"
-  | "expense"
-  | "trip"
-  | "note"
-  | "tag"
-  | "preset"
-  | "submission"
-  | "attachment"
-  | "inboxItem";
+/**
+ * The runtime list is the source of truth and EntityType is derived from it.
+ * They were separate lists once, and adding a type to one but not the other
+ * left that entity with no map at all - every read of it crashed the app.
+ */
+export const ENTITY_TYPES = [
+  "party",
+  "client",
+  "role",
+  "shift",
+  "expense",
+  "trip",
+  "note",
+  "tag",
+  "preset",
+  "submission",
+  "attachment",
+  "inboxItem",
+  "adjustment",
+] as const;
+
+export type EntityType = (typeof ENTITY_TYPES)[number];
 
 /**
  * An immutable change. Carries only the fields it changes, so replaying a

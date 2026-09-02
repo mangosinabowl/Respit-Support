@@ -163,6 +163,28 @@ export interface Attachment extends BaseRecord {
   attachedToId: Id;
 }
 
+/**
+ * A late change to what a payer is invoiced, held apart from the record it
+ * concerns.
+ *
+ * The log is append-only and a shift already worked is a fact: it should not be
+ * rewritten because a payer negotiated a discount or a receipt was disputed.
+ * An adjustment sits alongside, carries the reason, and is applied only when a
+ * claim is worked out. The original still reads as what actually happened.
+ *
+ * A final invoice applies these silently. A draft shows each one with its note,
+ * so the worker can check what he is about to send.
+ */
+export interface Adjustment extends BaseRecord {
+  payerPartyId: Id;
+  /** What it concerns, for a draft to point at. Blank means the claim overall. */
+  targetType?: "shift" | "expense" | "trip";
+  targetId?: Id;
+  /** Added to the claim, in cents. Negative reduces it. */
+  amountDelta: Money;
+  note: string;
+}
+
 export interface Tag extends BaseRecord {
   label: string;
   colour: string;

@@ -1,4 +1,4 @@
-import { compareEvents, type DomainEvent, type EntityType } from "./events";
+import { compareEvents, ENTITY_TYPES, type DomainEvent, type EntityType } from "./events";
 import type { Id } from "./primitives";
 
 export interface EntityRecord {
@@ -9,20 +9,7 @@ export interface EntityRecord {
 
 export type EntityStore = Record<EntityType, Map<Id, EntityRecord>>;
 
-const ENTITY_TYPES: EntityType[] = [
-  "party",
-  "client",
-  "role",
-  "shift",
-  "expense",
-  "trip",
-  "note",
-  "tag",
-  "preset",
-  "submission",
-  "attachment",
-  "inboxItem",
-];
+
 
 export function emptyStore(): EntityStore {
   const store = {} as EntityStore;

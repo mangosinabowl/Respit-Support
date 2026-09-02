@@ -87,3 +87,5 @@ select.view-archived{background:var(--orange-soft);border-color:var(--orange)}
 .shot{display:inline-flex;flex-direction:column;gap:3px;align-items:center}
 .shot img{width:54px;height:54px;object-fit:cover;border:1px solid var(--line)}
 .file.tiny{padding:5px 9px;font-size:13px}
+.stat.two-ways{display:flex;flex-direction:column;gap:1px}
+.stat.two-ways em{font-style:normal;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.08em;margin:3px 0}

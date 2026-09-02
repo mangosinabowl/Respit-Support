@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { replay, live } from "../../src/domain/replay";
-import type { DomainEvent } from "../../src/domain/events";
+import { ENTITY_TYPES, type DomainEvent } from "../../src/domain/events";
 
 function ev(
   entityId: string,
@@ -121,6 +121,21 @@ describe("replay", () => {
     } as unknown as DomainEvent;
     const store = replay([unknown]);
     expect(Object.keys(store)).not.toContain("unknownType");
-    expect(Object.keys(store)).toHaveLength(12);
+    // Derived, not a literal: hardcoding the count made this fail the moment
+    // a legitimate new entity type was added.
+    expect(Object.keys(store)).toHaveLength(ENTITY_TYPES.length);
+  });
+});
+
+describe("the store covers every entity type", () => {
+  it("gives every declared type a map, so reading a new one cannot crash", () => {
+    const store = replay([]);
+    // The type list and the runtime list were once separate. Adding a type to
+    // one and not the other left that entity undefined, and the first read of
+    // it took the whole app down with "cannot read properties of undefined".
+    for (const t of ENTITY_TYPES) {
+      expect(store[t], `no map for "${t}"`).toBeInstanceOf(Map);
+      expect(() => live(store, t)).not.toThrow();
+    }
   });
 });

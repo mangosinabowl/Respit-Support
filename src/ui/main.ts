@@ -4,6 +4,8 @@ import { makeEvent, type DomainEvent } from "../domain/events";
 import { live, type replay } from "../domain/replay";
 import { owedByPayer } from "../domain/queries";
 import { clientsVisibleTo, filterShiftFor, filterExpenseFor, type AudienceContext } from "../domain/audience";
+import { buildInvoice, type Invoice } from "../domain/invoice";
+import { printInvoices } from "./invoicePrint";
 import { expenseAsMinutes, splitByPercent } from "../domain/expenseTime";
 import { tripShares } from "../domain/mileage";
 import { checkShift, checkExpense, checkTrip, isSubmittable, type Violation } from "../domain/invariants";
@@ -13,7 +15,7 @@ import { syncOnce } from "../store/sync";
 import { connectDrive, driveRemote } from "../store/googleDrive";
 import { newId, nowInstant } from "../domain/primitives";
 import { splitShiftAt, mergeShifts } from "../domain/operations";
-import type { Shift, Expense, Client, Trip, Note, Attachment } from "../domain/entities";
+import type { Shift, Expense, Client, Trip, Note, Attachment, Adjustment } from "../domain/entities";
 
 const db = new RespiteDb();
 const dev = deviceId();
@@ -198,6 +200,7 @@ async function render() {
   const allTrips = live(store, "trip") as unknown as Trip[];
   const notes = live(store, "note") as unknown as Note[];
   const attachments = live(store, "attachment") as unknown as Attachment[];
+  const adjustments = live(store, "adjustment") as unknown as Adjustment[];
   const trips = allTrips.filter((t) => !t.archived && t.reimbursementStatus !== "paid");
   // Archived records and settled expenses drop out of the working views but
   // stay in every total, and stay restorable.
@@ -237,7 +240,7 @@ async function render() {
     </section>
     ${ui.view.as === "me" ? ""
       : ui.view.as === "archived" ? archivedView(archived, shiftsAll, allExpenses, owed, name, allTrips)
-      : shareView(ui.view.as, ui.view.clientId || clients[0]?.id || "", allShifts, expenses, everyone, name, trips, notes, store)}
+      : shareView(ui.view.as, ui.view.clientId || clients[0]?.id || "", allShifts, expenses, everyone, name, trips, notes, store, adjustments)}
 
     ${ui.view.as !== "me" ? "" : `
     <div class="grid">
@@ -436,7 +439,7 @@ async function render() {
     </section>`}
     ${confirmModal()}`;
 
-  wire(open, clients, done, expenses, allShifts, name, allExpenses, allTrips);
+  wire(open, clients, done, expenses, allShifts, name, allExpenses, allTrips, adjustments, everyone);
 }
 
 /**
@@ -496,7 +499,7 @@ function archivedView(people: Client[], shifts: Shift[], expenses: Expense[], ow
   ${nothing ? `<section class="card"><p class="sub">Nothing has been archived. Archiving puts things away without deleting them — you can bring anything back from here.</p></section>` : ""}`;
 }
 
-function shareView(as: "guardian" | "payer", clientId: string, shifts: Shift[], expenses: Expense[], clients: Client[], name: (id: string) => string, trips: Trip[], notes: Note[], store: ReturnType<typeof replay>) {
+function shareView(as: "guardian" | "payer", clientId: string, shifts: Shift[], expenses: Expense[], clients: Client[], name: (id: string) => string, trips: Trip[], notes: Note[], store: ReturnType<typeof replay>, adjustments: Adjustment[]) {
   const who = clients.find((c) => c.id === clientId);
   if (!who) return `<section class="card"><p class="empty">Add someone first.</p></section>`;
 
@@ -530,50 +533,83 @@ function shareView(as: "guardian" | "payer", clientId: string, shifts: Shift[], 
   const mileageTotal = theirTrips.flatMap((t) => t.splits.filter((sp) => sp.clientId === clientId)).reduce((a, sp) => a + sp.claimAmount, 0);
   const rate = who.defaultRate ?? 0;
 
+  // Built from the unfiltered records on purpose. The audience filter strips
+  // reimbursementStatus, which would make every shift look unbillable and
+  // silently drop all the time from the invoice. buildInvoice is already
+  // scoped to this payer, so it cannot reach another family's money anyway -
+  // the filtered set above is what governs what is DISPLAYED as theirs.
+  const billable = shifts.filter((s) => s.endAt && s.participants.some((p) => p.payerPartyId === `payer-${clientId}`));
+  const invoice = buildInvoice(`payer-${clientId}`, clientId, who.name, billable, expenses, trips, adjustments);
   const totalWorked = rows.reduce((t, r) => t + r.worked, 0);
-  const totalExtra = rows.reduce((t, r) => t + r.extra, 0) + expenseAsMinutes(looseTotal + mileageTotal, rate);
-  const totalMoney = rows.reduce((t, r) => t + Math.round(r.worked / 60 * r.p.payRate) + r.share, 0) + looseTotal + mileageTotal;
+  const outlay = invoice.expenses + invoice.mileage;
+  const outlayAsTime = expenseAsMinutes(outlay, rate);
 
-  return `<section class="card view-${as}">
+  const sharedNotes = (() => {
+    const ids = new Set(theirShifts.map((x) => x.id));
+    return notes.filter((n) => ids.has(n.attachedToId) && n.visibility[as]);
+  })();
+
+  const lineRows = invoice.lines.map((l) => `<tr>
+      <td>${day(l.when)}</td>
+      <td>${l.detail}${l.quantity ? `<br><span class="sub">${l.quantity}</span>` : ""}</td>
+      <td class="n">${money(l.amount)}</td>
+    </tr>`).join("");
+
+  return `<section class="card">
     <h2>${as === "guardian" ? "Guardian view" : "Payer view"} — ${who.name}</h2>
     <p class="sub">${as === "guardian"
-      ? "Only this person is shown. Nothing about anyone else on the same shift is visible."
-      : "Expense shares are shown as the extra time they are worth at this person's agreed rate. The rate is unchanged."}</p>
-    ${rows.length ? `<table>
-      <tr><th>When</th><th class="n">Time</th>${as === "payer" ? `<th class="n">Extra for expenses</th><th class="n">Billable</th>` : `<th class="n">Support</th><th class="n">Expenses</th><th class="n">Total</th>`}</tr>
-      ${rows.map((r) => as === "payer"
-        ? `<tr><td>${day(r.s.startAt)}</td><td class="n">${dur(r.worked)}</td>
-             <td class="n">${r.extra ? `+${dur(r.extra)}` : "—"}</td>
-             <td class="n">${dur(r.worked + r.extra)}</td></tr>`
-        : `<tr><td>${day(r.s.startAt)}</td><td class="n">${dur(r.worked)}</td>
-             <td class="n">${money(Math.round(r.worked / 60 * r.p.payRate))}</td>
-             <td class="n">${r.share ? money(r.share) : "—"}</td>
-             <td class="n">${money(Math.round(r.worked / 60 * r.p.payRate) + r.share)}</td></tr>`).join("")}
+      ? "Only this person is shown. Every line says what it is made of, so the cost can be checked rather than taken on trust."
+      : "The same claim two ways: what it costs, or the time it is worth at this person's agreed rate. The rate is unchanged."}</p>
+
+    ${invoice.lines.length ? `<table>
+      <tr><th>When</th><th>What</th><th class="n">Amount</th></tr>
+      ${lineRows}
+      <tr><td></td><td><b>Time</b></td><td class="n"><b>${money(invoice.time)}</b></td></tr>
+      <tr><td></td><td><b>Expenses</b></td><td class="n"><b>${money(invoice.expenses)}</b></td></tr>
+      <tr><td></td><td><b>Mileage</b></td><td class="n"><b>${money(invoice.mileage)}</b></td></tr>
+      ${invoice.adjustments ? `<tr><td></td><td><b>Adjustments</b></td><td class="n"><b>${money(invoice.adjustments)}</b></td></tr>` : ""}
+      <tr><td></td><td><b>Total</b></td><td class="n"><b>${money(invoice.total)}</b></td></tr>
     </table>` : `<p class="empty">Nothing recorded for ${who.name} yet.</p>`}
-    ${theirTrips.length ? `<h3 style="margin-top:14px">Mileage</h3>
-      <table><tbody>${theirTrips.map((t) => {
-        const share = t.splits.filter((sp) => sp.clientId === clientId).reduce((a, sp) => a + sp.claimAmount, 0);
-        return `<tr><td>${t.purpose || "Trip"}<br><span class="sub">${day(t.occurredAt)} · ${t.distance}${t.distanceUnit}</span></td>
-          <td class="n">${as === "payer" ? `+${dur(expenseAsMinutes(share, rate))}` : money(share)}</td></tr>`;
-      }).join("")}</tbody></table>` : ""}
-    ${looseTotal ? `<p class="sub" style="margin-top:8px">${as === "payer"
-        ? `Expenses not tied to a shift: +${dur(expenseAsMinutes(looseTotal, rate))} at ${money(rate)}/hr.`
-        : `Expenses not tied to a shift: ${money(looseTotal)}.`}</p>` : ""}
-    ${(() => {
-      // Only notes explicitly shared with THIS audience, and only on shifts
-      // this person was actually on.
-      const ids = new Set(theirShifts.map((x) => x.id));
-      const shared = notes.filter((n) => ids.has(n.attachedToId) && n.visibility[as]);
-      return shared.length ? `<h3 style="margin-top:14px">Notes</h3>
-        <table><tbody>${shared.map((n) => `<tr><td>${n.body}<br><span class="sub">${day(n.occurredAt)}</span></td></tr>`).join("")}</tbody></table>` : "";
-    })()}
+
+    ${sharedNotes.length ? `<h3 style="margin-top:14px">Notes</h3>
+      <table><tbody>${sharedNotes.map((n) => `<tr><td>${n.body}<br><span class="sub">${day(n.occurredAt)}</span></td></tr>`).join("")}</tbody></table>` : ""}
+
+    ${as === "payer" ? `<div class="acts" style="margin-top:14px">
+      <button class="tiny" data-print="one">Invoice for ${who.name}</button>
+      <button class="tiny ghost" data-print="all">Every person, one page each</button>
+      <button class="tiny ghost" data-print="draft">Draft with notes</button>
+    </div>
+
+    <h3 style="margin-top:16px">Adjustments</h3>
+    <p class="sub">A late change to what is invoiced. The shift or receipt itself is untouched — it stays a record of what happened. A final invoice folds these into the total; a draft shows them.</p>
+    ${adjustments.filter((a) => a.payerPartyId === `payer-${clientId}`).length
+      ? `<table><tbody>${adjustments.filter((a) => a.payerPartyId === `payer-${clientId}`).map((a) => `<tr>
+          <td>${a.note || "Adjustment"}<br><span class="sub">${day(a.occurredAt)}</span></td>
+          <td class="n">${money(a.amountDelta)}</td>
+          <td class="n">${trash("adjustment", a.id, `${a.note} (${money(a.amountDelta)})`, "adjustment")}</td></tr>`).join("")}</tbody></table>`
+      : `<p class="empty">None.</p>`}
+    <div class="row">
+      <input id="adjNote" placeholder="Reason, e.g. agreed discount" />
+      <input id="adjAmt" type="number" step="0.01" placeholder="-5.00" style="max-width:120px" title="Negative reduces the invoice" />
+      <button class="tiny" data-add-adj="${clientId}">Add</button>
+    </div>
+
+    ${invoice.total ? `<div class="acts" style="margin-top:14px">
+      <button class="tiny pink" data-mark-paid="payer-${clientId}">Mark all as paid</button>
+    </div>` : ""}` : ""}
+
     <div class="grid" style="margin-top:12px">
       ${as === "payer"
         ? `<div class="stat"><b>${dur(totalWorked)}</b><span>time with ${who.name}</span></div>
-           <div class="stat"><b>+${dur(totalExtra)}</b><span>from expenses and mileage</span></div>
-           <div class="stat"><b>${dur(totalWorked + totalExtra)}</b><span>billable at ${money(rate)}/hr</span></div>`
+           <div class="stat two-ways"><b>${money(outlay)}</b><span>expenses and mileage</span>
+             <em>or</em>
+             <b>+${dur(outlayAsTime)}</b><span>at ${money(rate)}/hr</span></div>
+           <div class="stat"><b>${money(invoice.total)}</b><span>total owed</span></div>`
         : `<div class="stat"><b>${dur(totalWorked)}</b><span>time</span></div>
-           <div class="stat"><b>${money(totalMoney)}</b><span>total owed</span></div>`}
+           <div class="stat"><b>${money(invoice.time)}</b><span>support</span></div>
+           <div class="stat"><b>${money(invoice.expenses)}</b><span>expenses</span></div>
+           <div class="stat"><b>${money(invoice.mileage)}</b><span>mileage</span></div>
+           <div class="stat"><b>${money(invoice.total)}</b><span>total owed</span></div>`}
     </div>
   </section>`;
 }
@@ -581,6 +617,18 @@ function shareView(as: "guardian" | "payer", clientId: string, shifts: Shift[], 
 function confirmModal() {
   const c = ui.confirm;
   if (!c) return "";
+  if (c.what === "payment") {
+    return `<div class="overlay" data-close-modal="1"><div class="modal">
+      <h3>Mark this as paid?</h3>
+      <div class="target">${c.label}</div>
+      <p>Every unclaimed and submitted shift, expense and trip for them moves to paid and leaves the working lists.</p>
+      <p>Nothing is deleted. You can reopen any of it from the Archived view.</p>
+      <div class="acts">
+        <button class="ghost" data-close-modal="1">Cancel</button>
+        <button class="confirm" id="doPaid">Mark paid</button>
+      </div>
+    </div></div>`;
+  }
   const note = c.what === "shift"
     ? "Its expenses stay, but they will no longer be attached to a shift."
     : c.what === "person"
@@ -648,7 +696,7 @@ function shiftDetail(s: Shift, expenses: Expense[], done: Shift[], name: (id: st
   </div>`;
 }
 
-function wire(open: Shift | undefined, clients: Client[], done: Shift[], expenses: Expense[], allShifts: Shift[], name: (id: string) => string, allExpenses: Expense[], allTrips: Trip[]) {
+function wire(open: Shift | undefined, clients: Client[], done: Shift[], expenses: Expense[], allShifts: Shift[], name: (id: string) => string, allExpenses: Expense[], allTrips: Trip[], adjustments: Adjustment[], everyoneList: Client[]) {
   const $ = (id: string) => document.getElementById(id) as HTMLInputElement | null;
   const go = async (fn: () => Promise<void>) => { try { await fn(); } catch (err: any) { ui.msg = err.message; } render(); };
   const all = (sel: string, fn: (el: HTMLElement) => void) => document.querySelectorAll<HTMLElement>(sel).forEach(fn);
@@ -832,6 +880,15 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     if (e.target !== el) return; // clicks inside the dialog must not dismiss it
     ui.confirm = null;
     render();
+  });
+
+  if ($("doPaid")) $("doPaid")!.onclick = () => go(async () => {
+    const payer = ui.confirm!.id;
+    ui.confirm = null;
+    for (const from of ["unclaimed", "submitted"] as const) {
+      await restamp(payer, from as any, "paid");
+    }
+    ui.msg = "Marked paid. It is in the Archived view if you need it back.";
   });
 
   if ($("doDelete")) $("doDelete")!.onclick = () => go(async () => {
@@ -1132,7 +1189,7 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     ui.tripDraft = { km: "", purpose: "", rate: "" };
   });
 
-  /** Moves every unclaimed record for one payer to submitted, under one claim id. */
+  /** Moves every record for one payer from one status to the next, under one claim id. */
   const restamp = async (payerPartyId: string, from: "unclaimed" | "submitted", to: "submitted" | "paid") => {
     const submissionId = newId();
     const touch = async (type: "shift" | "expense" | "trip", records: { id: string; reimbursementStatus: string }[], belongs: (r: any) => boolean) => {
@@ -1165,6 +1222,52 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     await restamp(el.dataset.settle!, "submitted", "paid");
     ui.msg = "Marked paid.";
   }));
+
+  const invoiceFor = (cid: string) => {
+    const c = everyoneList.find((x) => x.id === cid);
+    return buildInvoice(`payer-${cid}`, cid, c?.name ?? "Unknown", allShifts, allExpenses, allTrips, adjustments);
+  };
+
+  all("[data-print]", (el) => el.onclick = () => go(async () => {
+    const mode = el.dataset.print!;
+    const who = ui.view.clientId || clients[0]?.id || "";
+    if (mode === "all") {
+      // Everyone who is actually owed something: a page reading zero helps
+      // nobody and makes the file harder to read.
+      const invoices = clients.map((c) => invoiceFor(c.id)).filter((i) => i.total !== 0);
+      if (!invoices.length) throw new Error("Nothing to invoice yet.");
+      printInvoices(invoices, false);
+    } else {
+      const inv = invoiceFor(who);
+      if (!inv.total && mode !== "draft") throw new Error("Nothing to invoice for this person yet.");
+      printInvoices([inv], mode === "draft");
+    }
+  }));
+
+  all("[data-add-adj]", (el) => el.onclick = () => go(async () => {
+    const amount = Math.round(parseFloat($("adjAmt")!.value || "0") * 100);
+    if (!amount) throw new Error("Enter an amount. Negative reduces the invoice.");
+    await emit("adjustment", newId(), {
+      payerPartyId: `payer-${el.dataset.addAdj!}`,
+      amountDelta: amount,
+      note: $("adjNote")!.value.trim() || "Adjustment",
+      occurredAt: nowInstant(), recordedAt: nowInstant(),
+      zone: Intl.DateTimeFormat().resolvedOptions().timeZone, tags: [], customFields: {},
+    });
+    ui.msg = "Adjustment added. The original records are unchanged.";
+  }));
+
+  all("[data-mark-paid]", (el) => el.onclick = (e) => {
+    e.stopPropagation();
+    const payer = el.dataset.markPaid!;
+    const inv = invoiceFor(payer.replace(/^payer-/, ""));
+    ui.confirm = {
+      kind: "paid", id: payer,
+      label: `${inv.clientName} — ${money(inv.total)}`,
+      what: "payment",
+    };
+    render();
+  });
 
   if ($("syncNow")) $("syncNow")!.onclick = () => runSync(true);
   if ($("connectDrive")) $("connectDrive")!.onclick = () => go(async () => {
