@@ -24,6 +24,7 @@ const ui = {
   openShift: null as string | null,
   editing: null as string | null,
   msg: "",
+  confirm: null as { kind: string; id: string; label: string; what: string } | null,
   sort: { shifts: { key: "startAt", dir: -1 }, expenses: { key: "occurredAt", dir: -1 }, owed: { key: "unclaimed", dir: -1 } },
 };
 
@@ -44,6 +45,12 @@ function sorted<T>(rows: T[], s: { key: string; dir: number }): T[] {
     return (typeof x === "number" ? x - y : String(x).localeCompare(String(y))) * s.dir;
   });
 }
+const TRASH = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>`;
+
+/** A trash button that asks before it acts. */
+const trash = (kind: string, id: string, label: string, what: string) =>
+  `<button class="trash" title="Delete" data-ask="${kind}|${id}|${encodeURIComponent(label)}|${encodeURIComponent(what)}">${TRASH}</button>`;
+
 const arrow = (s: { key: string; dir: number }, k: string) => s.key === k ? `<span class="ar">${s.dir > 0 ? "\u25B2" : "\u25BC"}</span>` : "";
 
 async function render() {
@@ -82,10 +89,24 @@ async function render() {
     <section class="card ${open ? "live" : ""}">
       <h2>${open ? "Shift running" : "Start a shift"}</h2>
       ${open
-        ? `<p class="big">since ${hhmm(open.startAt)}</p>
-           <p class="who">${open.participants.map((p) => name(p.clientId)).join(", ") || "nobody added"} \u00B7 ${dur(mins(open.startAt, nowInstant()))}</p>
+        ? `<p class="big">since ${hhmm(open.startAt)} \u00B7 ${dur(mins(open.startAt, nowInstant()))}</p>
+           <table><tbody>${open.participants.map((p, i) => {
+             const gone = Date.parse(p.outAt) > Date.parse(p.inAt);
+             return `<tr><td>${name(p.clientId)}<br><span class="sub">${hhmm(p.inAt)}${gone ? `\u2013${hhmm(p.outAt)}` : " \u2192 still here"} @ ${money(p.payRate)}/hr</span></td>
+               <td class="n">${gone ? `<span class="pill">left</span>` : `<button class="tiny ghost" data-left="${i}">Mark left</button>`}</td></tr>`;
+           }).join("")}</tbody></table>
+           ${clients.filter((c) => !open.participants.some((p) => p.clientId === c.id)).length
+             ? `<div class="row"><select id="arrive">${clients.filter((c) => !open.participants.some((p) => p.clientId === c.id)).map((c) => `<option value="${c.id}">${c.name}</option>`).join("")}</select>
+                <input id="arate" type="number" value="30" step="0.5" style="max-width:110px" />
+                <button class="pink" id="addp">Someone arrived</button></div>`
+             : ""}
+           <label>When two people overlap</label>
+           <select id="rule">
+             <option value="fullPerPayer">Each payer pays the full hour</option>
+             <option value="splitEvenly">Split the hour between them</option>
+           </select>
            <div class="acts"><button id="end" class="primary">End shift</button>
-           <button class="danger" data-del-shift="${open.id}">Discard</button></div>`
+           ${trash("shift", open.id, `the shift running since ${hhmm(open.startAt)}`, "shift")}</div>`
         : clients.length
           ? `<label>Who are you with?</label>
              <select id="who">${clients.map((c) => `<option value="${c.id}">${c.name}</option>`).join("")}</select>
@@ -103,7 +124,7 @@ async function render() {
                <button class="tiny ghost" data-cancel="1">Cancel</button></div></td></tr>`
           : `<tr><td>${c.name}</td><td class="n">
                <button class="tiny ghost" data-edit="${c.id}">Rename</button>
-               <button class="danger" data-del-client="${c.id}">Remove</button></td></tr>`).join("")
+               ${trash("client", c.id, c.name, "person")}</td></tr>`).join("")
           || `<tr><td class="empty">Nobody yet</td></tr>`}
       </tbody></table>
       <div class="row"><input id="cname" placeholder="Name" /><button id="addc">Add</button></div>
@@ -138,7 +159,7 @@ async function render() {
                <button class="tiny ghost" data-cancel="1">Cancel</button></div></td></tr>`
           : `<tr><td>${e.description}</td><td>${day(e.occurredAt)}</td><td class="n">${money(e.totalAmount)}</td>
              <td class="n"><button class="tiny ghost" data-edit="${e.id}">Edit</button>
-             <button class="danger" data-del-exp="${e.id}">Remove</button></td></tr>`).join("")}
+             ${trash("expense", e.id, `${e.description} (${money(e.totalAmount)})`, "expense")}</td></tr>`).join("")}
       </table>` : `<p class="empty">None yet.</p>`}
       <div class="row"><input id="edesc" placeholder="What for?" /><input id="eamt" type="number" placeholder="0.00" step="0.01" /><button id="adde">Add</button></div>
     </section>
@@ -159,9 +180,30 @@ async function render() {
       <h2>Backup</h2>
       <div class="row"><button id="exp" class="pink">Download log</button><label class="file">Restore<input id="imp" type="file" accept="application/json" hidden /></label></div>
       <p class="msg">${ui.msg}</p>
-    </section>`;
+    </section>
+    ${confirmModal()}`;
 
   wire(open, clients, done, expenses);
+}
+
+function confirmModal() {
+  const c = ui.confirm;
+  if (!c) return "";
+  const note = c.what === "shift"
+    ? "Its expenses stay, but they will no longer be attached to a shift."
+    : c.what === "person"
+      ? "Shifts already logged for them are kept."
+      : "";
+  return `<div class="overlay" data-close-modal="1"><div class="modal">
+    <h3>Delete this ${c.what}?</h3>
+    <div class="target">${c.label}</div>
+    <p>${note}</p>
+    <p>It stops showing in the app. Nothing is erased from the log, so a restore still brings it back.</p>
+    <div class="acts">
+      <button class="ghost" data-close-modal="1">Cancel</button>
+      <button class="confirm" id="doDelete">Delete</button>
+    </div>
+  </div></div>`;
 }
 
 function shiftDetail(s: Shift, expenses: Expense[], done: Shift[], name: (id: string) => string) {
@@ -178,7 +220,7 @@ function shiftDetail(s: Shift, expenses: Expense[], done: Shift[], name: (id: st
       <button class="tiny ghost" data-split="${s.id}">Split in half</button>
       ${others.length ? `<select id="mergeWith" style="width:auto">${others.map((o) => `<option value="${o.id}">${day(o.startAt)} ${hhmm(o.startAt)}</option>`).join("")}</select>
         <button class="tiny pink" data-merge="${s.id}">Merge with</button>` : ""}
-      <button class="danger" data-del-shift="${s.id}">Delete shift</button>
+      ${trash("shift", s.id, `${day(s.startAt)} ${hhmm(s.startAt)}–${hhmm(s.endAt!)}`, "shift")}
       <button class="tiny ghost" data-cancel="1">Close</button>
     </div>
   </div>`;
@@ -206,9 +248,25 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
   all("[data-edit]", (el) => el.onclick = (e) => { e.stopPropagation(); ui.editing = el.dataset.edit!; render(); });
   all("[data-cancel]", (el) => el.onclick = (e) => { e.stopPropagation(); ui.editing = null; ui.openShift = null; ui.msg = ""; render(); });
 
-  all("[data-del-client]", (el) => el.onclick = (e) => { e.stopPropagation(); go(() => remove("client", el.dataset.delClient!)); });
-  all("[data-del-exp]", (el) => el.onclick = (e) => { e.stopPropagation(); go(() => remove("expense", el.dataset.delExp!)); });
-  all("[data-del-shift]", (el) => el.onclick = (e) => { e.stopPropagation(); go(async () => { ui.openShift = null; await remove("shift", el.dataset.delShift!); }); });
+  all("[data-ask]", (el) => el.onclick = (e) => {
+    e.stopPropagation();
+    const [kind, id, label, what] = el.dataset.ask!.split("|");
+    ui.confirm = { kind, id, label: decodeURIComponent(label), what: decodeURIComponent(what) };
+    render();
+  });
+
+  all("[data-close-modal]", (el) => el.onclick = (e) => {
+    if (e.target !== el) return; // clicks inside the dialog must not dismiss it
+    ui.confirm = null;
+    render();
+  });
+
+  if ($("doDelete")) $("doDelete")!.onclick = () => go(async () => {
+    const c = ui.confirm!;
+    ui.confirm = null;
+    if (c.kind === "shift") ui.openShift = null;
+    await remove(c.kind as Parameters<typeof makeEvent>[0], c.id);
+  });
 
   all("[data-save-client]", (el) => el.onclick = () => go(async () => {
     const v = $("ren")!.value.trim();
@@ -270,7 +328,34 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
 
   if ($("end")) $("end")!.onclick = () => go(async () => {
     const now = nowInstant();
-    await emit("shift", open!.id, { endAt: now, participants: open!.participants.map((p) => ({ ...p, outAt: now })) });
+    const rule = ($("rule") as unknown as HTMLSelectElement | null)?.value ?? "fullPerPayer";
+    // Anyone already marked as having left keeps the time they left at; only
+    // those still present are closed out now.
+    await emit("shift", open!.id, {
+      endAt: now,
+      participants: open!.participants.map((p) =>
+        Date.parse(p.outAt) > Date.parse(p.inAt) ? { ...p, timeRule: rule } : { ...p, outAt: now, timeRule: rule }),
+    });
+  });
+
+  all("[data-left]", (el) => el.onclick = () => go(async () => {
+    const i = Number(el.dataset.left);
+    const now = nowInstant();
+    await emit("shift", open!.id, {
+      participants: open!.participants.map((p, j) => (j === i ? { ...p, outAt: now } : p)),
+    });
+  }));
+
+  if ($("addp")) $("addp")!.onclick = () => go(async () => {
+    const clientId = ($("arrive") as unknown as HTMLSelectElement).value;
+    const payRate = Math.round(parseFloat($("arate")!.value || "0") * 100);
+    const now = nowInstant();
+    // One shift, several people, different arrival times - exactly what the
+    // allocation engine is built to bill correctly.
+    await emit("shift", open!.id, {
+      participants: [...open!.participants, { clientId, payerPartyId: `payer-${clientId}`, inAt: now, outAt: now, payRate, timeRule: "fullPerPayer" }],
+    });
+    ui.msg = `${clients.find((c) => c.id === clientId)?.name ?? "They"} added to this shift.`;
   });
 
   if ($("adde")) $("adde")!.onclick = () => go(async () => {

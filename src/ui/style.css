@@ -52,3 +52,18 @@ tr.open td{background:var(--pink-soft)}
 .stat b{display:block;font-size:19px;font-weight:600}
 .stat span{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
 pre{white-space:pre-wrap;color:var(--danger)}
+
+/* Destructive actions: icon button plus a confirm step, so a stray tap on a
+   phone cannot quietly remove a shift the worker was paid for. */
+button.trash{background:transparent;color:var(--muted);padding:6px;line-height:0;cursor:pointer}
+button.trash:hover{color:var(--danger);background:var(--pink-soft)}
+button.trash svg{width:17px;height:17px;display:block}
+.overlay{position:fixed;inset:0;background:rgba(43,35,32,.42);display:flex;align-items:center;justify-content:center;padding:20px;z-index:50}
+.modal{background:var(--panel);border-top:5px solid var(--pink);padding:20px;max-width:400px;width:100%}
+.modal h3{margin:0 0 8px;font-size:17px}
+.modal p{margin:0 0 6px;color:var(--muted);font-size:14px}
+.modal .target{color:var(--ink);font-weight:600;background:var(--orange-soft);padding:8px;margin:10px 0 4px;word-break:break-word}
+.modal .acts{justify-content:flex-end;margin-top:16px}
+button.confirm{background:var(--danger);color:#fff}
+.sub{color:var(--muted);font-size:12px}
+.sub{color:var(--muted);font-size:12px}
