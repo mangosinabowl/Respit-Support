@@ -8,6 +8,21 @@ export interface OwedRow {
   unclaimed: Money;
   submitted: Money;
   paid: Money;
+  /**
+   * The same money split by where it came from. An invoice has to separate
+   * hours worked from money laid out and paid back - they are taxed and
+   * questioned differently - and a combined figure cannot be checked against
+   * anything.
+   */
+  time: SourceTotals;
+  expenses: SourceTotals;
+  mileage: SourceTotals;
+}
+
+export interface SourceTotals {
+  unclaimed: Money;
+  submitted: Money;
+  paid: Money;
 }
 
 type Bucket = "unclaimed" | "submitted" | "paid";
@@ -26,9 +41,15 @@ function bucketOf(status: string): Bucket | null {
 export function owedByPayer(store: EntityStore): OwedRow[] {
   const rows = new Map<Id, OwedRow>();
 
-  const add = (payerPartyId: Id, bucket: Bucket, amount: Money) => {
-    const row = rows.get(payerPartyId) ?? { payerPartyId, unclaimed: 0, submitted: 0, paid: 0 };
+  const zero = (): SourceTotals => ({ unclaimed: 0, submitted: 0, paid: 0 });
+
+  const add = (payerPartyId: Id, bucket: Bucket, amount: Money, source: "time" | "expenses" | "mileage") => {
+    const row = rows.get(payerPartyId) ?? {
+      payerPartyId, unclaimed: 0, submitted: 0, paid: 0,
+      time: zero(), expenses: zero(), mileage: zero(),
+    };
     row[bucket] += amount;
+    row[source][bucket] += amount;
     rows.set(payerPartyId, row);
   };
 
@@ -36,20 +57,20 @@ export function owedByPayer(store: EntityStore): OwedRow[] {
     const bucket = bucketOf(shift.reimbursementStatus);
     if (!bucket || !shift.endAt) continue;
     for (const claim of allocateTime(shift.participants ?? [])) {
-      add(claim.payerPartyId, bucket, claim.amount);
+      add(claim.payerPartyId, bucket, claim.amount, "time");
     }
   }
 
   for (const expense of live(store, "expense") as unknown as Expense[]) {
     const bucket = bucketOf(expense.reimbursementStatus);
     if (!bucket) continue;
-    for (const s of expense.splits ?? []) add(s.payerPartyId, bucket, s.amount);
+    for (const s of expense.splits ?? []) add(s.payerPartyId, bucket, s.amount, "expenses");
   }
 
   for (const trip of live(store, "trip") as unknown as Trip[]) {
     const bucket = bucketOf(trip.reimbursementStatus);
     if (!bucket || !trip.isClaimable) continue;
-    for (const s of trip.splits ?? []) add(s.payerPartyId, bucket, s.claimAmount);
+    for (const s of trip.splits ?? []) add(s.payerPartyId, bucket, s.claimAmount, "mileage");
   }
 
   return [...rows.values()].sort((a, b) => a.payerPartyId.localeCompare(b.payerPartyId));

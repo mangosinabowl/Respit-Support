@@ -24,7 +24,14 @@ describe("owedByPayer", () => {
       }),
     ]);
     const rows = owedByPayer(store);
-    expect(rows).toEqual([{ payerPartyId: "p1", unclaimed: 9000 + 3400, submitted: 0, paid: 0 }]);
+    expect(rows).toEqual([{
+      payerPartyId: "p1", unclaimed: 9000 + 3400, submitted: 0, paid: 0,
+      // The same money, split by where it came from: hours worked against
+      // money laid out. An invoice cannot merge the two.
+      time: { unclaimed: 9000, submitted: 0, paid: 0 },
+      expenses: { unclaimed: 3400, submitted: 0, paid: 0 },
+      mileage: { unclaimed: 0, submitted: 0, paid: 0 },
+    }]);
   });
 
   it("separates unclaimed, submitted and paid", () => {
@@ -33,7 +40,12 @@ describe("owedByPayer", () => {
       ev("expense", "e2", { totalAmount: 2000, reimbursementStatus: "submitted", splits: [{ clientId: "c1", payerPartyId: "p1", amount: 2000 }] }),
       ev("expense", "e3", { totalAmount: 3000, reimbursementStatus: "paid", splits: [{ clientId: "c1", payerPartyId: "p1", amount: 3000 }] }),
     ]);
-    expect(owedByPayer(store)).toEqual([{ payerPartyId: "p1", unclaimed: 1000, submitted: 2000, paid: 3000 }]);
+    expect(owedByPayer(store)).toEqual([{
+      payerPartyId: "p1", unclaimed: 1000, submitted: 2000, paid: 3000,
+      time: { unclaimed: 0, submitted: 0, paid: 0 },
+      expenses: { unclaimed: 1000, submitted: 2000, paid: 3000 },
+      mileage: { unclaimed: 0, submitted: 0, paid: 0 },
+    }]);
   });
 
   it("keeps payers separate and sorted", () => {
@@ -72,7 +84,12 @@ describe("owedByPayer", () => {
     ]);
     // Dropping it would hide 3 hours of real work from the Owed screen with
     // nothing to indicate anything was missing.
-    expect(owedByPayer(store)).toEqual([{ payerPartyId: "p9", unclaimed: 9000, submitted: 0, paid: 0 }]);
+    expect(owedByPayer(store)).toEqual([{
+      payerPartyId: "p9", unclaimed: 9000, submitted: 0, paid: 0,
+      time: { unclaimed: 9000, submitted: 0, paid: 0 },
+      expenses: { unclaimed: 0, submitted: 0, paid: 0 },
+      mileage: { unclaimed: 0, submitted: 0, paid: 0 },
+    }]);
   });
 
   it("still excludes notReimbursable, which genuinely is owed by nobody", () => {
@@ -83,5 +100,23 @@ describe("owedByPayer", () => {
       }),
     ]);
     expect(owedByPayer(store)).toEqual([]);
+  });
+
+  it("keeps the breakdown adding up to the totals", () => {
+    const store = replay([
+      ev("shift", "s1", {
+        startAt: T(15), endAt: T(18), reimbursementStatus: "unclaimed",
+        participants: [{ clientId: "c1", payerPartyId: "p1", inAt: T(15), outAt: T(18), payRate: 3000, timeRule: "fullPerPayer" }],
+      }),
+      ev("expense", "x1", { totalAmount: 3400, reimbursementStatus: "submitted", splits: [{ clientId: "c1", payerPartyId: "p1", amount: 3400 }] }),
+    ]);
+    for (const r of owedByPayer(store)) {
+      // Whatever the split, each status column must still equal the sum of its
+      // three sources - otherwise the breakdown is telling a different story
+      // from the total it sits under.
+      expect(r.time.unclaimed + r.expenses.unclaimed + r.mileage.unclaimed).toBe(r.unclaimed);
+      expect(r.time.submitted + r.expenses.submitted + r.mileage.submitted).toBe(r.submitted);
+      expect(r.time.paid + r.expenses.paid + r.mileage.paid).toBe(r.paid);
+    }
   });
 });

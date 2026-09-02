@@ -209,11 +209,19 @@ async function render() {
       <h2>Owed</h2>
       ${owed.length ? `<table>
         <tr><th data-sort="owed:payerPartyId">Payer ${arrow(ui.sort.owed, "payerPartyId")}</th>
+            <th></th>
             <th class="n" data-sort="owed:unclaimed">Unclaimed ${arrow(ui.sort.owed, "unclaimed")}</th>
             <th class="n" data-sort="owed:submitted">Submitted ${arrow(ui.sort.owed, "submitted")}</th>
             <th class="n" data-sort="owed:paid">Paid ${arrow(ui.sort.owed, "paid")}</th></tr>
-        ${sorted(owed, ui.sort.owed).map((r) => `<tr><td>${name(r.payerPartyId.replace(/^payer-/, ""))}</td>
-          <td class="n">${money(r.unclaimed)}</td><td class="n">${money(r.submitted)}</td><td class="n">${money(r.paid)}</td></tr>`).join("")}
+        ${sorted(owed, ui.sort.owed).map((r) => {
+          const src = [["Time", r.time], ["Expenses", r.expenses], ["Mileage", r.mileage]] as const;
+          return `<tr><td><b>${name(r.payerPartyId.replace(/^payer-/, ""))}</b></td>
+              <td class="sub">total</td>
+              <td class="n"><b>${money(r.unclaimed)}</b></td><td class="n"><b>${money(r.submitted)}</b></td><td class="n"><b>${money(r.paid)}</b></td></tr>
+            ${src.filter(([, t]) => t.unclaimed || t.submitted || t.paid).map(([label, t]) =>
+              `<tr><td></td><td class="sub">${label}</td>
+                 <td class="n sub">${money(t.unclaimed)}</td><td class="n sub">${money(t.submitted)}</td><td class="n sub">${money(t.paid)}</td></tr>`).join("")}`;
+        }).join("")}
       </table>` : `<p class="empty">Nothing owed yet.</p>`}
     </section>
 
