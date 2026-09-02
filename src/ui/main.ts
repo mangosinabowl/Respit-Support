@@ -1,38 +1,91 @@
+import "./style.css";
 import { RespiteDb, appendEvent, hydrate, nextSeq, deviceId, exportEventLog, importEventLog } from "../store/db";
-import { makeEvent } from "../domain/events";
+import { makeEvent, type DomainEvent } from "../domain/events";
 import { live } from "../domain/replay";
 import { owedByPayer } from "../domain/queries";
 import { newId, nowInstant } from "../domain/primitives";
+import { splitShiftAt, mergeShifts } from "../domain/operations";
 import type { Shift, Expense, Client } from "../domain/entities";
 
 const db = new RespiteDb();
 const dev = deviceId();
 const app = document.getElementById("app")!;
-// Canadian dollars. Amounts are integer cents everywhere underneath.
-const money = (c: number) => new Intl.NumberFormat("en-CA", { style: "currency", currency: "CAD" }).format(c / 100);
-const time = (s: string) => new Date(s).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
-async function emit(fields: Parameters<typeof makeEvent>[2], type: Parameters<typeof makeEvent>[0], id: string) {
+const money = (c: number) => new Intl.NumberFormat("en-CA", { style: "currency", currency: "CAD" }).format(c / 100);
+const hhmm = (s: string) => new Date(s).toLocaleTimeString("en-CA", { hour: "2-digit", minute: "2-digit" });
+const day = (s: string) => new Date(s).toLocaleDateString("en-CA", { month: "short", day: "numeric" });
+const forInput = (s: string) => { const d = new Date(s); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 16); };
+const fromInput = (v: string) => new Date(v).toISOString();
+const mins = (a: string, b: string) => Math.max(0, Math.round((Date.parse(b) - Date.parse(a)) / 60000));
+const dur = (m: number) => `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
+
+/** Purely visual state: what is expanded, what is being edited, how lists are sorted. */
+const ui = {
+  openShift: null as string | null,
+  editing: null as string | null,
+  msg: "",
+  sort: { shifts: { key: "startAt", dir: -1 }, expenses: { key: "occurredAt", dir: -1 }, owed: { key: "unclaimed", dir: -1 } },
+};
+
+async function emit(type: Parameters<typeof makeEvent>[0], id: string, fields: Record<string, unknown>) {
   await appendEvent(db, makeEvent(type, id, fields, dev, await nextSeq(db, dev)));
 }
+async function emitAll(events: DomainEvent[]) { for (const e of events) await appendEvent(db, e); }
+
+/** Soft delete. The record stays in the log; it just stops being live. */
+const remove = (type: Parameters<typeof makeEvent>[0], id: string) => emit(type, id, { deleted: true });
+
+function sorted<T>(rows: T[], s: { key: string; dir: number }): T[] {
+  return [...rows].sort((a, b) => {
+    const x = (a as any)[s.key], y = (b as any)[s.key];
+    if (x === y) return 0;
+    if (x == null) return 1;
+    if (y == null) return -1;
+    return (typeof x === "number" ? x - y : String(x).localeCompare(String(y))) * s.dir;
+  });
+}
+const arrow = (s: { key: string; dir: number }, k: string) => s.key === k ? `<span class="ar">${s.dir > 0 ? "\u25B2" : "\u25BC"}</span>` : "";
 
 async function render() {
   const store = await hydrate(db);
   const clients = live(store, "client") as unknown as Client[];
-  const shifts = (live(store, "shift") as unknown as Shift[]).sort((a, b) => b.startAt.localeCompare(a.startAt));
+  const allShifts = live(store, "shift") as unknown as Shift[];
   const expenses = live(store, "expense") as unknown as Expense[];
-  const open = shifts.find((s) => !s.endAt);
+  const open = allShifts.find((s) => !s.endAt);
+  const done = allShifts.filter((s) => s.endAt);
   const owed = owedByPayer(store);
+  const name = (id: string) => clients.find((c) => c.id === id)?.name ?? "\u2014";
+
+  const totalMins = done.reduce((t, s) => t + s.participants.reduce((m, p) => Math.max(m, mins(p.inAt, p.outAt)), 0), 0);
+  const totalOwed = owed.reduce((t, r) => t + r.unclaimed, 0);
+
+  const shiftRows = sorted(done.map((s) => ({
+    id: s.id, startAt: s.startAt, endAt: s.endAt!, people: s.participants.map((p) => name(p.clientId)).join(", "),
+    minutes: s.participants.reduce((m, p) => Math.max(m, mins(p.inAt, p.outAt)), 0),
+    pay: s.participants.reduce((t, p) => t + Math.round(mins(p.inAt, p.outAt) / 60 * p.payRate), 0),
+  })), ui.sort.shifts);
+
+  const expRows = sorted(expenses.map((e) => ({
+    id: e.id, description: e.description, totalAmount: e.totalAmount, occurredAt: e.occurredAt, shiftId: e.shiftId ?? null,
+  })), ui.sort.expenses);
 
   app.innerHTML = `
     <header><h1>Respite Support</h1><span class="dev">device ${dev.slice(0, 8)}</span></header>
 
+    <div class="grid">
+      <div class="stat"><b>${dur(totalMins)}</b><span>logged</span></div>
+      <div class="stat"><b>${money(totalOwed)}</b><span>unclaimed</span></div>
+      <div class="stat"><b>${done.length}</b><span>shifts</span></div>
+      <div class="stat"><b>${expenses.length}</b><span>expenses</span></div>
+    </div>
+
     <section class="card ${open ? "live" : ""}">
-      <h2>${open ? "Shift running" : "No shift running"}</h2>
+      <h2>${open ? "Shift running" : "Start a shift"}</h2>
       ${open
-        ? `<p class="big">since ${time(open.startAt)}</p>
-           <p class="who">${open.participants.map((p) => clients.find((c) => c.id === p.clientId)?.name ?? p.clientId).join(", ") || "no one added"}</p>
-           <button id="end" class="primary">End shift</button>`
+        ? `<p class="big">since ${hhmm(open.startAt)}</p>
+           <p class="who">${open.participants.map((p) => name(p.clientId)).join(", ") || "nobody added"} \u00B7 ${dur(mins(open.startAt, nowInstant()))}</p>
+           <div class="acts"><button id="end" class="primary">End shift</button>
+           <button class="danger" data-del-shift="${open.id}">Discard</button></div>`
         : clients.length
           ? `<label>Who are you with?</label>
              <select id="who">${clients.map((c) => `<option value="${c.id}">${c.name}</option>`).join("")}</select>
@@ -43,95 +96,207 @@ async function render() {
 
     <section class="card">
       <h2>People</h2>
-      <ul class="list">${clients.map((c) => `<li>${c.name}</li>`).join("") || `<li class="empty">Nobody yet</li>`}</ul>
+      <table><tbody>
+        ${clients.map((c) => ui.editing === c.id
+          ? `<tr><td colspan="2"><div class="row"><input id="ren" value="${c.name}" />
+               <button class="tiny" data-save-client="${c.id}">Save</button>
+               <button class="tiny ghost" data-cancel="1">Cancel</button></div></td></tr>`
+          : `<tr><td>${c.name}</td><td class="n">
+               <button class="tiny ghost" data-edit="${c.id}">Rename</button>
+               <button class="danger" data-del-client="${c.id}">Remove</button></td></tr>`).join("")
+          || `<tr><td class="empty">Nobody yet</td></tr>`}
+      </tbody></table>
       <div class="row"><input id="cname" placeholder="Name" /><button id="addc">Add</button></div>
     </section>
 
     <section class="card">
-      <h2>Expense</h2>
-      <div class="row">
-        <input id="edesc" placeholder="What for?" />
-        <input id="eamt" type="number" placeholder="0.00" step="0.01" />
-        <button id="adde">Add</button>
-      </div>
-      <ul class="list">${expenses.slice(-5).reverse().map((e) => `<li>${e.description} <b>${money(e.totalAmount)}</b></li>`).join("") || `<li class="empty">None yet</li>`}</ul>
+      <h2>Shifts</h2>
+      ${shiftRows.length ? `<table>
+        <tr><th data-sort="shifts:startAt">When ${arrow(ui.sort.shifts, "startAt")}</th>
+            <th data-sort="shifts:people">Who ${arrow(ui.sort.shifts, "people")}</th>
+            <th class="n" data-sort="shifts:minutes">Time ${arrow(ui.sort.shifts, "minutes")}</th>
+            <th class="n" data-sort="shifts:pay">Pay ${arrow(ui.sort.shifts, "pay")}</th></tr>
+        ${shiftRows.map((r) => `<tr class="click ${ui.openShift === r.id ? "open" : ""}" data-shift="${r.id}">
+            <td>${day(r.startAt)} ${hhmm(r.startAt)}\u2013${hhmm(r.endAt)}</td>
+            <td>${r.people}</td><td class="n">${dur(r.minutes)}</td><td class="n">${money(r.pay)}</td></tr>`).join("")}
+      </table>` : `<p class="empty">No finished shifts yet.</p>`}
+      ${ui.openShift ? shiftDetail(allShifts.find((s) => s.id === ui.openShift)!, expenses, done, name) : ""}
+    </section>
+
+    <section class="card">
+      <h2>Expenses</h2>
+      ${expRows.length ? `<table>
+        <tr><th data-sort="expenses:description">What ${arrow(ui.sort.expenses, "description")}</th>
+            <th data-sort="expenses:occurredAt">When ${arrow(ui.sort.expenses, "occurredAt")}</th>
+            <th class="n" data-sort="expenses:totalAmount">Amount ${arrow(ui.sort.expenses, "totalAmount")}</th>
+            <th></th></tr>
+        ${expRows.map((e) => ui.editing === e.id
+          ? `<tr><td colspan="4"><div class="row">
+               <input id="ed" value="${e.description}" />
+               <input id="ea" type="number" step="0.01" value="${(e.totalAmount / 100).toFixed(2)}" />
+               <button class="tiny" data-save-exp="${e.id}">Save</button>
+               <button class="tiny ghost" data-cancel="1">Cancel</button></div></td></tr>`
+          : `<tr><td>${e.description}</td><td>${day(e.occurredAt)}</td><td class="n">${money(e.totalAmount)}</td>
+             <td class="n"><button class="tiny ghost" data-edit="${e.id}">Edit</button>
+             <button class="danger" data-del-exp="${e.id}">Remove</button></td></tr>`).join("")}
+      </table>` : `<p class="empty">None yet.</p>`}
+      <div class="row"><input id="edesc" placeholder="What for?" /><input id="eamt" type="number" placeholder="0.00" step="0.01" /><button id="adde">Add</button></div>
     </section>
 
     <section class="card">
       <h2>Owed</h2>
-      ${owed.length
-        ? `<table><tr><th>Payer</th><th>Unclaimed</th><th>Submitted</th><th>Paid</th></tr>
-           ${owed.map((r) => `<tr><td>${r.payerPartyId}</td><td class="n">${money(r.unclaimed)}</td><td class="n">${money(r.submitted)}</td><td class="n">${money(r.paid)}</td></tr>`).join("")}</table>`
-        : `<p class="empty">Nothing owed yet.</p>`}
+      ${owed.length ? `<table>
+        <tr><th data-sort="owed:payerPartyId">Payer ${arrow(ui.sort.owed, "payerPartyId")}</th>
+            <th class="n" data-sort="owed:unclaimed">Unclaimed ${arrow(ui.sort.owed, "unclaimed")}</th>
+            <th class="n" data-sort="owed:submitted">Submitted ${arrow(ui.sort.owed, "submitted")}</th>
+            <th class="n" data-sort="owed:paid">Paid ${arrow(ui.sort.owed, "paid")}</th></tr>
+        ${sorted(owed, ui.sort.owed).map((r) => `<tr><td>${name(r.payerPartyId.replace(/^payer-/, ""))}</td>
+          <td class="n">${money(r.unclaimed)}</td><td class="n">${money(r.submitted)}</td><td class="n">${money(r.paid)}</td></tr>`).join("")}
+      </table>` : `<p class="empty">Nothing owed yet.</p>`}
     </section>
 
     <section class="card">
       <h2>Backup</h2>
-      <div class="row"><button id="exp">Download log</button><label class="file">Restore<input id="imp" type="file" accept="application/json" hidden /></label></div>
-      <p id="msg" class="msg"></p>
-    </section>
-
-    <section class="card">
-      <h2>Recent shifts</h2>
-      <ul class="list">${shifts.filter((s) => s.endAt).slice(0, 5).map((s) => `<li>${new Date(s.startAt).toLocaleDateString()} ${time(s.startAt)}–${time(s.endAt!)}</li>`).join("") || `<li class="empty">None yet</li>`}</ul>
+      <div class="row"><button id="exp" class="pink">Download log</button><label class="file">Restore<input id="imp" type="file" accept="application/json" hidden /></label></div>
+      <p class="msg">${ui.msg}</p>
     </section>`;
 
-  const on = (id: string, ev: string, fn: (e: any) => void) => document.getElementById(id)?.addEventListener(ev, fn);
+  wire(open, clients, done, expenses);
+}
 
-  on("addc", "click", async () => {
-    const el = document.getElementById("cname") as HTMLInputElement;
-    if (!el.value.trim()) return;
-    await emit({ name: el.value.trim(), occurredAt: nowInstant(), recordedAt: nowInstant() }, "client", newId());
+function shiftDetail(s: Shift, expenses: Expense[], done: Shift[], name: (id: string) => string) {
+  const attached = expenses.filter((e) => e.shiftId === s.id);
+  const others = done.filter((d) => d.id !== s.id);
+  return `<div class="detail">
+    <h3>Shift detail</h3>
+    <div class="row"><label style="flex:0 0 auto">Start</label><input id="sst" type="datetime-local" value="${forInput(s.startAt)}" />
+      <label style="flex:0 0 auto">End</label><input id="sen" type="datetime-local" value="${forInput(s.endAt!)}" />
+      <button class="tiny" data-save-shift="${s.id}">Save</button></div>
+    <p style="margin:10px 0 4px">${s.participants.map((p) => `<span class="pill">${name(p.clientId)} ${hhmm(p.inAt)}\u2013${hhmm(p.outAt)} @ ${money(p.payRate)}/hr</span>`).join("")}</p>
+    <p style="margin:6px 0">${attached.length ? attached.map((e) => `<span class="pill warn">${e.description} ${money(e.totalAmount)}</span>`).join("") : `<span class="empty">No expenses attached</span>`}</p>
+    <div class="acts">
+      <button class="tiny ghost" data-split="${s.id}">Split in half</button>
+      ${others.length ? `<select id="mergeWith" style="width:auto">${others.map((o) => `<option value="${o.id}">${day(o.startAt)} ${hhmm(o.startAt)}</option>`).join("")}</select>
+        <button class="tiny pink" data-merge="${s.id}">Merge with</button>` : ""}
+      <button class="danger" data-del-shift="${s.id}">Delete shift</button>
+      <button class="tiny ghost" data-cancel="1">Close</button>
+    </div>
+  </div>`;
+}
+
+function wire(open: Shift | undefined, clients: Client[], done: Shift[], expenses: Expense[]) {
+  const $ = (id: string) => document.getElementById(id) as HTMLInputElement | null;
+  const go = async (fn: () => Promise<void>) => { try { await fn(); } catch (err: any) { ui.msg = err.message; } render(); };
+  const all = (sel: string, fn: (el: HTMLElement) => void) => document.querySelectorAll<HTMLElement>(sel).forEach(fn);
+
+  all("[data-sort]", (el) => el.onclick = () => {
+    const [list, key] = el.dataset.sort!.split(":") as [keyof typeof ui.sort, string];
+    const s = ui.sort[list];
+    s.dir = s.key === key ? -s.dir : -1;
+    s.key = key;
     render();
   });
 
-  on("start", "click", async () => {
-    const clientId = (document.getElementById("who") as HTMLSelectElement).value;
-    const payRate = Math.round(parseFloat((document.getElementById("rate") as HTMLInputElement).value) * 100);
+  all("[data-shift]", (el) => el.onclick = () => {
+    ui.openShift = ui.openShift === el.dataset.shift ? null : el.dataset.shift!;
+    ui.msg = "";
+    render();
+  });
+
+  all("[data-edit]", (el) => el.onclick = (e) => { e.stopPropagation(); ui.editing = el.dataset.edit!; render(); });
+  all("[data-cancel]", (el) => el.onclick = (e) => { e.stopPropagation(); ui.editing = null; ui.openShift = null; ui.msg = ""; render(); });
+
+  all("[data-del-client]", (el) => el.onclick = (e) => { e.stopPropagation(); go(() => remove("client", el.dataset.delClient!)); });
+  all("[data-del-exp]", (el) => el.onclick = (e) => { e.stopPropagation(); go(() => remove("expense", el.dataset.delExp!)); });
+  all("[data-del-shift]", (el) => el.onclick = (e) => { e.stopPropagation(); go(async () => { ui.openShift = null; await remove("shift", el.dataset.delShift!); }); });
+
+  all("[data-save-client]", (el) => el.onclick = () => go(async () => {
+    const v = $("ren")!.value.trim();
+    if (!v) return;
+    await emit("client", el.dataset.saveClient!, { name: v });
+    ui.editing = null;
+  }));
+
+  all("[data-save-exp]", (el) => el.onclick = () => go(async () => {
+    const cents = Math.round(parseFloat($("ea")!.value || "0") * 100);
+    await emit("expense", el.dataset.saveExp!, { description: $("ed")!.value || "Expense", totalAmount: cents });
+    ui.editing = null;
+  }));
+
+  all("[data-save-shift]", (el) => el.onclick = () => go(async () => {
+    const s = done.find((d) => d.id === el.dataset.saveShift)!;
+    const startAt = fromInput($("sst")!.value);
+    const endAt = fromInput($("sen")!.value);
+    if (Date.parse(endAt) <= Date.parse(startAt)) throw new Error("The end must come after the start.");
+    await emit("shift", s.id, { startAt, endAt, participants: s.participants.map((p) => ({ ...p, inAt: startAt, outAt: endAt })) });
+    ui.msg = "Shift updated.";
+  }));
+
+  all("[data-split]", (el) => el.onclick = () => go(async () => {
+    const s = done.find((d) => d.id === el.dataset.split)!;
+    const att = expenses.filter((e) => e.shiftId === s.id);
+    const mid = new Date((Date.parse(s.startAt) + Date.parse(s.endAt!)) / 2).toISOString();
+    await emitAll(splitShiftAt(s, mid, dev, await nextSeq(db, dev, 3 + att.length), att));
+    ui.openShift = null;
+    ui.msg = "Split into two shifts.";
+  }));
+
+  all("[data-merge]", (el) => el.onclick = () => go(async () => {
+    const a = done.find((d) => d.id === el.dataset.merge)!;
+    const b = done.find((d) => d.id === ($("mergeWith") as unknown as HTMLSelectElement).value)!;
+    const att = expenses.filter((e) => e.shiftId === a.id || e.shiftId === b.id);
+    await emitAll(mergeShifts(a, b, dev, await nextSeq(db, dev, 3 + att.length), att));
+    ui.openShift = null;
+    ui.msg = "Merged.";
+  }));
+
+  if ($("addc")) $("addc")!.onclick = () => go(async () => {
+    const v = $("cname")!.value.trim();
+    if (!v) return;
+    await emit("client", newId(), { name: v, occurredAt: nowInstant(), recordedAt: nowInstant() });
+  });
+
+  if ($("start")) $("start")!.onclick = () => go(async () => {
+    const clientId = ($("who") as unknown as HTMLSelectElement).value;
+    const payRate = Math.round(parseFloat($("rate")!.value) * 100);
     const now = nowInstant();
-    await emit({
-      startAt: now, endAt: null, occurredAt: now, recordedAt: now, zone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    await emit("shift", newId(), {
+      startAt: now, endAt: null, occurredAt: now, recordedAt: now,
+      zone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       participants: [{ clientId, payerPartyId: `payer-${clientId}`, inAt: now, outAt: now, payRate, timeRule: "fullPerPayer" }],
       isIncident: false, reimbursementStatus: "unclaimed", tags: [], customFields: {},
-    }, "shift", newId());
-    render();
+    });
   });
 
-  on("end", "click", async () => {
+  if ($("end")) $("end")!.onclick = () => go(async () => {
     const now = nowInstant();
-    await emit({ endAt: now, participants: open!.participants.map((p) => ({ ...p, outAt: now })) }, "shift", open!.id);
-    render();
+    await emit("shift", open!.id, { endAt: now, participants: open!.participants.map((p) => ({ ...p, outAt: now })) });
   });
 
-  on("adde", "click", async () => {
-    const d = document.getElementById("edesc") as HTMLInputElement;
-    const a = document.getElementById("eamt") as HTMLInputElement;
-    const cents = Math.round(parseFloat(a.value || "0") * 100);
+  if ($("adde")) $("adde")!.onclick = () => go(async () => {
+    const cents = Math.round(parseFloat($("eamt")!.value || "0") * 100);
     if (!cents) return;
     const clientId = clients[0]?.id ?? "unknown";
-    await emit({
-      description: d.value || "Expense", totalAmount: cents, category: "other", occurredAt: nowInstant(), recordedAt: nowInstant(),
-      shiftId: open?.id ?? null, receiptAttachmentIds: [], reimbursementStatus: "unclaimed",
+    await emit("expense", newId(), {
+      description: $("edesc")!.value || "Expense", totalAmount: cents, category: "other",
+      occurredAt: nowInstant(), recordedAt: nowInstant(), shiftId: open?.id ?? null,
+      receiptAttachmentIds: [], reimbursementStatus: "unclaimed",
       splits: [{ clientId, payerPartyId: `payer-${clientId}`, amount: cents }],
-    }, "expense", newId());
-    render();
+    });
   });
 
-  on("exp", "click", async () => {
-    const blob = new Blob([await exportEventLog(db)], { type: "application/json" });
+  if ($("exp")) $("exp")!.onclick = async () => {
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
+    a.href = URL.createObjectURL(new Blob([await exportEventLog(db)], { type: "application/json" }));
     a.download = `respite-log-${new Date().toISOString().slice(0, 10)}.json`;
     a.click();
-  });
+  };
 
-  on("imp", "change", async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const r = await importEventLog(db, await file.text());
-    (document.getElementById("msg") as HTMLElement).textContent =
-      `Restored ${r.imported}, already had ${r.skipped}${r.conflicts.length ? `, ${r.conflicts.length} conflict(s) kept back` : ""}.`;
-    render();
+  if ($("imp")) $("imp")!.onchange = (e: any) => go(async () => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    const r = await importEventLog(db, await f.text());
+    ui.msg = `Restored ${r.imported}, already had ${r.skipped}${r.conflicts.length ? `, ${r.conflicts.length} kept back` : ""}.`;
   });
 }
 
