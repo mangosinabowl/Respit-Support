@@ -1,8 +1,9 @@
 import "./style.css";
 import { RespiteDb, appendEvent, hydrate, nextSeq, deviceId, exportEventLog, importEventLog } from "../store/db";
 import { makeEvent, type DomainEvent } from "../domain/events";
-import { live } from "../domain/replay";
+import { live, type replay } from "../domain/replay";
 import { owedByPayer } from "../domain/queries";
+import { clientsVisibleTo, filterShiftFor, filterExpenseFor, type AudienceContext } from "../domain/audience";
 import { expenseAsMinutes, splitByPercent } from "../domain/expenseTime";
 import { tripShares } from "../domain/mileage";
 import { checkShift, checkExpense, checkTrip, isSubmittable, type Violation } from "../domain/invariants";
@@ -236,7 +237,7 @@ async function render() {
     </section>
     ${ui.view.as === "me" ? ""
       : ui.view.as === "archived" ? archivedView(archived, shiftsAll, allExpenses, owed, name, allTrips)
-      : shareView(ui.view.as, ui.view.clientId || clients[0]?.id || "", allShifts, expenses, everyone, name, trips, notes)}
+      : shareView(ui.view.as, ui.view.clientId || clients[0]?.id || "", allShifts, expenses, everyone, name, trips, notes, store)}
 
     ${ui.view.as !== "me" ? "" : `
     <div class="grid">
@@ -495,15 +496,25 @@ function archivedView(people: Client[], shifts: Shift[], expenses: Expense[], ow
   ${nothing ? `<section class="card"><p class="sub">Nothing has been archived. Archiving puts things away without deleting them — you can bring anything back from here.</p></section>` : ""}`;
 }
 
-function shareView(as: "guardian" | "payer", clientId: string, shifts: Shift[], expenses: Expense[], clients: Client[], name: (id: string) => string, trips: Trip[], notes: Note[]) {
+function shareView(as: "guardian" | "payer", clientId: string, shifts: Shift[], expenses: Expense[], clients: Client[], name: (id: string) => string, trips: Trip[], notes: Note[], store: ReturnType<typeof replay>) {
   const who = clients.find((c) => c.id === clientId);
   if (!who) return `<section class="card"><p class="empty">Add someone first.</p></section>`;
 
-  const theirShifts = shifts.filter((s) => s.endAt && s.participants.some((p) => p.clientId === clientId));
+  // Run the real audience filter rather than a hand-rolled one: this is the
+  // code that is tested against constructed leak attempts, and it is what
+  // decides what another family is allowed to see.
+  const ctx: AudienceContext = { audience: as, partyId: `payer-${clientId}` };
+  const visible = clientsVisibleTo(store, ctx);
+  const theirShifts = shifts
+    .filter((s) => s.endAt && s.participants.some((p) => p.clientId === clientId))
+    .map((s) => filterShiftFor(s, ctx, visible))
+    .filter((s): s is Shift => s !== null) as Shift[];
   const rows = theirShifts.map((s) => {
     const p = s.participants.find((x) => x.clientId === clientId)!;
     const worked = mins(p.inAt, p.outAt);
     const share = expenses
+      .map((e) => filterExpenseFor(e, ctx, visible))
+      .filter((e): e is Expense => e !== null)
       .filter((e) => e.shiftId === s.id)
       .flatMap((e) => e.splits.filter((sp) => sp.clientId === clientId))
       .reduce((t, sp) => t + sp.amount, 0);
@@ -920,7 +931,27 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     // $0 is allowed and meaningful: the worker himself appears on the list and
     // is not paid for his own time. Only a negative rate is nonsense.
     if (rate < 0) throw new Error("A rate cannot be negative.");
-    await emit("client", newId(), { name: v, defaultRate: rate, defaultTimeRule: "fullPerPayer", occurredAt: nowInstant(), recordedAt: nowInstant() });
+    const clientId = newId();
+    const partyId = `payer-${clientId}`;
+    await emit("client", clientId, { name: v, defaultRate: rate, defaultTimeRule: "fullPerPayer", occurredAt: nowInstant(), recordedAt: nowInstant() });
+    // The party and role records are what audience filtering reads. Without
+    // them the confidentiality rules have nothing to work from, so a shared
+    // view would have to be hand-rolled and could drift from the tested one.
+    await emit("party", partyId, {
+      kind: "org", name: `${v} (payer)`, defaultMileageRate: 68, mileagePolicy: "perTrip",
+      occurredAt: nowInstant(), recordedAt: nowInstant(), zone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      tags: [], customFields: {},
+    });
+    await emit("role", newId(), {
+      clientId, partyId, role: "payer",
+      occurredAt: nowInstant(), recordedAt: nowInstant(), zone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      tags: [], customFields: {},
+    });
+    await emit("role", newId(), {
+      clientId, partyId, role: "guardian",
+      occurredAt: nowInstant(), recordedAt: nowInstant(), zone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      tags: [], customFields: {},
+    });
   });
 
   if ($("start")) $("start")!.onclick = () => go(async () => {
@@ -1168,7 +1199,28 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
   });
 }
 
+/**
+ * People added before audience filtering existed have no role records, so the
+ * rules would find nothing visible and their shared views would come up empty.
+ * Give them the same records a new person gets. Idempotent: it only fills gaps.
+ */
+async function backfillRoles() {
+  const store = await hydrate(db);
+  const clients = live(store, "client") as unknown as Client[];
+  const roles = live(store, "role") as unknown as { clientId: string }[];
+  const have = new Set(roles.map((r) => r.clientId));
+  for (const c of clients) {
+    if (have.has(c.id)) continue;
+    const partyId = `payer-${c.id}`;
+    const meta = { occurredAt: nowInstant(), recordedAt: nowInstant(), zone: Intl.DateTimeFormat().resolvedOptions().timeZone, tags: [], customFields: {} };
+    await emit("party", partyId, { kind: "org", name: `${c.name} (payer)`, defaultMileageRate: 68, mileagePolicy: "perTrip", ...meta });
+    await emit("role", newId(), { clientId: c.id, partyId, role: "payer", ...meta });
+    await emit("role", newId(), { clientId: c.id, partyId, role: "guardian", ...meta });
+  }
+}
+
 db.open().then(async () => {
+  await backfillRoles();
   await render();
   // On open, every few minutes while open, and whenever the connection returns.
   void runSync(false);

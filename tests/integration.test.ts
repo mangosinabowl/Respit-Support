@@ -7,6 +7,7 @@ import { live } from "../src/domain/replay";
 import { owedByPayer } from "../src/domain/queries";
 import { allocateTime } from "../src/domain/timeAllocation";
 import { checkShift, checkExpense, checkTrip } from "../src/domain/invariants";
+import { clientsVisibleTo, filterShiftFor } from "../src/domain/audience";
 import { splitByPercent, expenseAsMinutes } from "../src/domain/expenseTime";
 import { tripShares } from "../src/domain/mileage";
 import { splitShiftAt, mergeShifts } from "../src/domain/operations";
@@ -22,6 +23,11 @@ async function seeded() {
   const put = async (t: any, id: string, f: any) => { n += 1; await appendEvent(db, makeEvent(t, id, f, dev, n)); };
 
   await put("client", "rory", { name: "Rory", defaultRate: 2000, defaultTimeRule: "fullPerPayer" });
+  // The role records the audience rules read. Without them nothing is visible
+  // to anyone, which is the safe direction but not a working app.
+  for (const [c, role] of [["rory", "payer"], ["rory", "guardian"], ["ph", "payer"], ["ph", "guardian"]] as const) {
+    await put("role", `${c}-${role}`, { clientId: c, partyId: `payer-${c}`, role, occurredAt: T(9), recordedAt: T(9), zone: "UTC", tags: [], customFields: {} });
+  }
   await put("client", "andrew", { name: "Andrew", defaultRate: 0, defaultTimeRule: "fullPerPayer" });
   await put("client", "ph", { name: "Placeholder", defaultRate: 3000, defaultTimeRule: "splitEvenly" });
 
@@ -151,5 +157,32 @@ describe("AUDIT", () => {
     const notes = live(store, "note") as unknown as any[];
     expect(notes[0].visibility.guardian).toBe(true);
     expect(notes[0].visibility.payer).toBe(false);
+  });
+
+  it("a guardian sees their own child and nothing about the other family", async () => {
+    const { db } = await seeded();
+    const store = await hydrate(db);
+    const ctx = { audience: "guardian" as const, partyId: "payer-rory" };
+    const visible = clientsVisibleTo(store, ctx);
+    expect(visible).toEqual(["rory"]);
+
+    const shift = (live(store, "shift") as unknown as Shift[])[0];
+    const filtered = filterShiftFor(shift, ctx, visible)!;
+    const asText = JSON.stringify(filtered);
+    // Placeholder was on the same shift. Nothing about them may survive.
+    expect(asText).not.toContain("ph");
+    expect(asText).not.toContain("Placeholder");
+    expect(filtered.participants.map((p) => p.clientId)).toEqual(["rory"]);
+  });
+
+  it("a payer for one family cannot see the other family's shift at all", async () => {
+    const { db } = await seeded();
+    const store = await hydrate(db);
+    const ctx = { audience: "payer" as const, partyId: "payer-ph" };
+    const visible = clientsVisibleTo(store, ctx);
+    expect(visible).toEqual(["ph"]);
+    const shift = (live(store, "shift") as unknown as Shift[])[0];
+    const filtered = filterShiftFor(shift, ctx, visible)!;
+    expect(JSON.stringify(filtered)).not.toContain("rory");
   });
 });
