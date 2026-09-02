@@ -12,14 +12,13 @@ import { step, todayKey, dayKey } from "../domain/calendar";
 import { expenseAsMinutes, splitByPercent } from "../domain/expenseTime";
 import { tripShares } from "../domain/mileage";
 import { checkShift, checkExpense, checkTrip, isSubmittable, type Violation } from "../domain/invariants";
-import { shrinkImage, readableSize } from "./photo";
 import { exportAll } from "../domain/backup";
 import { syncOnce } from "../store/sync";
 import { connectDrive, driveRemote } from "../store/googleDrive";
 import { pushShifts } from "../store/googleCalendar";
 import { newId, nowInstant } from "../domain/primitives";
 import { splitShiftAt, mergeShifts } from "../domain/operations";
-import type { Shift, Expense, Client, Trip, Note, Attachment, Adjustment, Submission } from "../domain/entities";
+import type { Shift, Expense, Client, Trip, Note, Adjustment, Submission } from "../domain/entities";
 
 const db = new RespiteDb();
 const dev = deviceId();
@@ -144,6 +143,9 @@ function connectionWarning(): { text: string; urgent: boolean } | null {
  * queried it.
  */
 function problems(list: Violation[]): string {
+  // Receipts are not part of the app yet, so a missing one is not a fault the
+  // worker can fix and must not be shown as one.
+  list = list.filter((v) => v.code !== "NO_RECEIPT");
   if (!list.length) return "";
   return `<p class="flag">${list.map((v) => v.message).join(" · ")}</p>`;
 }
@@ -217,7 +219,6 @@ async function render() {
   const allExpenses = live(store, "expense") as unknown as Expense[];
   const allTrips = live(store, "trip") as unknown as Trip[];
   const notes = live(store, "note") as unknown as Note[];
-  const attachments = live(store, "attachment") as unknown as Attachment[];
   const adjustments = live(store, "adjustment") as unknown as Adjustment[];
   const payments = live(store, "submission") as unknown as Submission[];
   const trips = allTrips.filter((t) => !t.archived && t.reimbursementStatus !== "paid");
@@ -381,13 +382,6 @@ async function render() {
                }).join("")}</tbody></table></td></tr>`
           : `<tr><td>${e.description}<br><span class="sub">${(expenses.find((x) => x.id === e.id)?.splits ?? [])
                  .map((sp) => `${name(sp.clientId)} ${money(sp.amount)}`).join(" · ") || "nobody"}</span>
-               ${(() => {
-                 const ex = expenses.find((x) => x.id === e.id)!;
-                 const shots = attachments.filter((a) => ex.receiptAttachmentIds.includes(a.id));
-                 return `<div class="receipts">${shots.map((a) => `<span class="shot"><img src="${a.dataUrl}" alt="Receipt" />
-                     <button class="tiny ghost" data-unshot="${ex.id}:${a.id}">Remove</button></span>`).join("")}
-                   <label class="file tiny">${shots.length ? "Add another" : "Add receipt"}<input type="file" accept="image/*" capture="environment" data-shot="${ex.id}" hidden /></label></div>`;
-               })()}
                ${(() => { const ex = expenses.find((x) => x.id === e.id)!; return ex.rejected
                  ? `<span class="pill warn" title="${ex.rejected.reason ?? "Came off an earlier invoice unpaid"}">still unpaid</span>` : ""; })()}
                ${problems(checkExpense(expenses.find((x) => x.id === e.id)!))}</td>
@@ -1112,30 +1106,6 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     render();
   });
 
-  all("[data-shot]", (el) => (el as HTMLInputElement).onchange = (ev: any) => go(async () => {
-    const file = ev.target.files?.[0];
-    if (!file) return;
-    const expenseId = el.dataset.shot!;
-    const { dataUrl, bytes } = await shrinkImage(file);
-    const attachmentId = newId();
-    await emit("attachment", attachmentId, {
-      mimeType: "image/jpeg", dataUrl, bytes,
-      attachedToType: "expense", attachedToId: expenseId,
-      occurredAt: nowInstant(), recordedAt: nowInstant(),
-      zone: Intl.DateTimeFormat().resolvedOptions().timeZone, tags: [], customFields: {},
-    });
-    const ex = allExpenses.find((x) => x.id === expenseId)!;
-    await emit("expense", expenseId, { receiptAttachmentIds: [...ex.receiptAttachmentIds, attachmentId] });
-    ui.msg = `Receipt attached (${readableSize(bytes)}).`;
-  }));
-
-  all("[data-unshot]", (el) => el.onclick = () => go(async () => {
-    const [expenseId, attachmentId] = el.dataset.unshot!.split(":");
-    const ex = allExpenses.find((x) => x.id === expenseId)!;
-    await emit("expense", expenseId, { receiptAttachmentIds: ex.receiptAttachmentIds.filter((i) => i !== attachmentId) });
-    await emit("attachment", attachmentId, { deleted: true });
-  }));
-
   all("[data-efor]", (el) => (el as HTMLInputElement).onchange = () => {
     const id = el.dataset.efor!;
     if (ui.editSplit[id] === undefined) ui.editSplit[id] = 0; else delete ui.editSplit[id];
@@ -1537,8 +1507,9 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
       ...allExpenses.filter((e) => e.reimbursementStatus === "unclaimed" && e.splits.some((sp) => sp.payerPartyId === payer)).flatMap(checkExpense),
       ...allTrips.filter((t) => t.reimbursementStatus === "unclaimed" && t.splits.some((sp) => sp.payerPartyId === payer)).flatMap(checkTrip),
     ];
-    if (!isSubmittable(bad)) {
-      throw new Error(`Not ready to send: ${bad.map((v) => v.message).join("; ")}`);
+    const blocking = bad.filter((v) => v.code !== "NO_RECEIPT");
+    if (!isSubmittable(blocking)) {
+      throw new Error(`Not ready to send: ${blocking.map((v) => v.message).join("; ")}`);
     }
     // The invoice record is written here, not on payment: an invoice exists as
     // soon as it goes out, and anything later pulled back off it needs
