@@ -384,9 +384,9 @@ async function render() {
         <tr><th data-sort="expenses:description">What ${arrow(ui.sort.expenses, "description")}</th>
             <th data-sort="expenses:occurredAt">When ${arrow(ui.sort.expenses, "occurredAt")}</th>
             <th class="n" data-sort="expenses:totalAmount">Amount ${arrow(ui.sort.expenses, "totalAmount")}</th>
-            <th></th></tr>
+            <th>On which shift</th><th></th></tr>
         ${expRows.map((e) => ui.editing === e.id
-          ? `<tr><td colspan="4"><div class="row">
+          ? `<tr><td colspan="5"><div class="row">
                <input id="ed" value="${e.description}" />
                <input id="ea" type="number" step="0.01" value="${(e.totalAmount / 100).toFixed(2)}" style="max-width:120px" />
                <button class="tiny" data-save-exp="${e.id}">Save</button>
@@ -406,6 +406,7 @@ async function render() {
                  ? `<span class="pill warn" title="${ex.rejected.reason ?? "Came off an earlier invoice unpaid"}">still unpaid</span>` : ""; })()}
                ${problems(checkExpense(expenses.find((x) => x.id === e.id)!))}</td>
              <td>${day(e.occurredAt)}</td><td class="n">${money(e.totalAmount)}</td>
+             <td>${shiftPicker(e.id, e.shiftId, (expenses.find((x) => x.id === e.id)?.splits ?? []).map((sp) => sp.clientId), allShifts, name)}</td>
              <td class="n"><button class="tiny ghost" data-edit="${e.id}">Edit</button>
              <button class="tiny ghost" data-paid="${e.id}">Mark paid</button>
              ${trash("expense", e.id, `${e.description} (${money(e.totalAmount)})`, "expense")}</td></tr>`).join("")}
@@ -447,6 +448,7 @@ async function render() {
         ${trips.map((t) => `<tr><td>${t.purpose || "Trip"}<br><span class="sub">${day(t.occurredAt)} · ${t.distance}${t.distanceUnit} · ${t.splits.map((sp) => `${name(sp.clientId)} ${money(sp.claimAmount)}`).join(" · ")}</span>
           ${t.rejected ? `<span class="pill warn" title="${t.rejected.reason ?? "Came off an earlier invoice unpaid"}">still unpaid</span>` : ""}${problems(checkTrip(t))}</td>
           <td class="n">${money(t.splits.reduce((a, sp) => a + sp.claimAmount, 0))}</td>
+          <td>${shiftPicker(t.id, t.shiftId, t.splits.map((sp) => sp.clientId), allShifts, name)}</td>
           <td class="n">${trash("trip", t.id, `${t.purpose || "Trip"} (${t.distance}${t.distanceUnit})`, "trip")}</td></tr>`).join("")}
       </table>` : `<p class="empty">No trips yet.</p>`}` : `<p class="empty">Add someone you support first.</p>`}
     </section>
@@ -982,6 +984,24 @@ function confirmModal() {
       <button class="confirm" id="doDelete">Delete</button>
     </div>
   </div></div>`;
+}
+
+/**
+ * The shifts an expense or trip could belong to: only those that already have
+ * one of its people on them. Attaching a receipt to a shift that person was not
+ * on would put it on the wrong payer's invoice.
+ */
+function shiftPicker(itemId: string, currentShiftId: string | null | undefined, clientIds: string[], shifts: Shift[], name: (id: string) => string): string {
+  const candidates = shifts.filter((sh) => sh.participants.some((p) => clientIds.includes(p.clientId)));
+  if (!candidates.length) {
+    return `<span class="sub">no shift with ${clientIds.map(name).join(" or ")} on it</span>`;
+  }
+  return `<select data-tie="${itemId}" style="max-width:210px">
+    <option value=""${!currentShiftId ? " selected" : ""}>Not tied to a shift</option>
+    ${candidates.map((sh) => `<option value="${sh.id}"${currentShiftId === sh.id ? " selected" : ""}>
+      ${day(sh.startAt)} ${hhmm(sh.startAt)} · ${sh.participants.map((p) => name(p.clientId)).join(", ")}
+    </option>`).join("")}
+  </select>`;
 }
 
 function shiftDetail(s: Shift, expenses: Expense[], done: Shift[], name: (id: string) => string, clients: Client[], notes: Note[]) {
@@ -1739,6 +1759,16 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
       zone: Intl.DateTimeFormat().resolvedOptions().timeZone, tags: [], customFields: {},
     });
     ui.msg = "Adjustment added. The original records are unchanged.";
+  }));
+
+  all("[data-tie]", (el) => (el as HTMLSelectElement).onchange = () => go(async () => {
+    const id = el.dataset.tie!;
+    const shiftId = (el as HTMLSelectElement).value || null;
+    const kind = allExpenses.some((x) => x.id === id) ? "expense" : "trip";
+    await emit(kind, id, { shiftId });
+    ui.msg = shiftId
+      ? "Tied to that shift. It goes out with whatever that shift is invoiced under."
+      : "Untied. It goes on the next invoice for whoever it is for.";
   }));
 
   all("[data-rehome]", (el) => el.onclick = () => go(async () => {
