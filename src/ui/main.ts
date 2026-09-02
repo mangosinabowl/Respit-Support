@@ -13,6 +13,7 @@ import { step, todayKey, dayKey } from "../domain/calendar";
 import { expenseAsMinutes, splitByPercent } from "../domain/expenseTime";
 import { tripShares } from "../domain/mileage";
 import { checkShift, checkExpense, checkTrip, isSubmittable, type Violation } from "../domain/invariants";
+import { findOverlaps } from "../domain/overlap";
 import { exportAll } from "../domain/backup";
 import { syncOnce } from "../store/sync";
 import { connectDrive, driveRemote } from "../store/googleDrive";
@@ -49,6 +50,8 @@ const ui = {
   draft: { desc: "", amt: "", when: "" },
   draftShift: { from: "", to: "" },
   tripWhen: "",
+  /** Who a shift is being started with, and at what rate each. */
+  startWith: {} as Record<string, number>,
   tripFor: {} as Record<string, number>,
   /** Shares being edited on an existing expense, seeded from what it already has. */
   editSplit: {} as Record<string, number>,
@@ -308,11 +311,19 @@ async function render() {
            <div class="acts"><button id="end" class="primary">End shift</button>
            ${trash("shift", open.id, `the shift running since ${hhmm(open.startAt)}`, "shift")}</div>`
         : clients.length
-          ? `<label>Who are you with?</label>
-             <select id="who">${clients.map((c) => `<option value="${c.id}">${c.name}</option>`).join("")}</select>
-             <label>Rate $/hr (CAD)</label><input id="rate" type="number" value="${((clients[0].defaultRate ?? 0) / 100).toFixed(2)}" step="0.5" />
-             <p class="sub">Their own standing rate, and it is snapshotted onto this shift. Change it under People to change it from now on.</p>
-             <button id="start" class="primary">Start shift</button>`
+          ? `<p class="sub">Who are you with? Tick everyone who is here now — anyone who turns up later can be added while the shift runs.</p>
+             <table><tbody>${clients.map((c) => {
+               const on = ui.startWith[c.id] !== undefined;
+               return `<tr>
+                 <td style="width:26px"><input type="checkbox" data-startwith="${c.id}" ${on ? "checked" : ""} style="width:auto" /></td>
+                 <td>${c.name}<br><span class="sub">${RULE_LABEL[c.defaultTimeRule ?? "fullPerPayer"]}</span></td>
+                 <td class="n" style="width:150px">${on
+                   ? `$<input type="number" step="0.5" data-startrate="${c.id}" value="${(ui.startWith[c.id] / 100).toFixed(2)}" style="max-width:100px" />/hr`
+                   : `<span class="sub">${(c.defaultRate ?? 0) === 0 ? "not billed" : `${money(c.defaultRate ?? 0)}/hr`}</span>`}</td>
+               </tr>`;
+             }).join("")}</tbody></table>
+             <p class="sub">Rates start from each person's standing rate and are snapshotted onto this shift, so changing them later never rewrites it.</p>
+             <button id="start" class="primary">Start shift${Object.keys(ui.startWith).length > 1 ? ` with ${Object.keys(ui.startWith).length} people` : ""}</button>`
           : `<p class="empty">Add someone you support first.</p>`}
     </section>
 
@@ -354,7 +365,12 @@ async function render() {
             <th class="n" data-sort="shifts:pay">Pay ${arrow(ui.sort.shifts, "pay")}</th></tr>
         ${shiftRows.map((r) => `<tr class="click ${ui.openShift === r.id ? "open" : ""}" data-shift="${r.id}">
             <td>${day(r.startAt)} ${hhmm(r.startAt)}\u2013${hhmm(r.endAt)}</td>
-            <td>${r.people}${(() => { const sh = allShifts.find((s) => s.id === r.id)!; return sh.rejected
+            <td>${r.people}${(() => {
+              const sh = allShifts.find((s) => s.id === r.id)!;
+              const clashes = findOverlaps(sh, allShifts);
+              return clashes.length
+                ? `<span class="pill warn" title="${clashes.map((c) => `${c.clientIds.map(name).join(", ")} is on both, ${dur(c.minutes)} of the same time`).join(" · ")}">overlaps another shift</span>` : "";
+            })()}${(() => { const sh = allShifts.find((s) => s.id === r.id)!; return sh.rejected
               ? `<span class="pill warn" title="${sh.rejected.reason ?? "Came off an earlier invoice unpaid"}">still unpaid</span>` : ""; })()}
               ${problems(checkShift(allShifts.find((s) => s.id === r.id)!))}</td>
             <td class="n">${dur(r.minutes)}</td><td class="n">${money(r.pay)}</td></tr>`).join("")}
@@ -977,6 +993,18 @@ function shiftDetail(s: Shift, expenses: Expense[], done: Shift[], name: (id: st
     <div class="row"><label style="flex:0 0 auto">Start</label><input id="sst" type="datetime-local" value="${forInput(s.startAt)}" />
       <label style="flex:0 0 auto">End</label><input id="sen" type="datetime-local" value="${forInput(s.endAt!)}" />
       <button class="tiny" data-save-shift="${s.id}">Save</button></div>
+    ${(() => {
+      const clashes = findOverlaps(s, done);
+      if (!clashes.length) return "";
+      return `<div class="flag" style="display:block;margin:10px 0">
+        <b>This overlaps another shift.</b>
+        ${clashes.map((c) => `<br>${c.clientIds.map(name).join(", ")} ${c.clientIds.length === 1 ? "is" : "are"} on both for ${dur(c.minutes)}
+          (${day(c.other.startAt)} ${hhmm(c.other.startAt)}${c.other.endAt ? `–${hhmm(c.other.endAt)}` : ""}),
+          so that time would be billed twice.`).join("")}
+        <br><span class="sub">Merging joins them into one shift and unions each person's hours, so nobody is charged for the same hour twice.</span>
+      </div>`;
+    })()}
+
     <h3 style="margin-top:12px">Who was there</h3>
     <table><tbody>${s.participants.map((p, i) => `<tr>
       <td>${name(p.clientId)}</td>
@@ -1347,17 +1375,34 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     });
   });
 
+  all("[data-startwith]", (el) => (el as HTMLInputElement).onchange = () => {
+    const id = el.dataset.startwith!;
+    if (ui.startWith[id] === undefined) {
+      ui.startWith[id] = clients.find((c) => c.id === id)?.defaultRate ?? 0;
+    } else delete ui.startWith[id];
+    render();
+  });
+  all("[data-startrate]", (el) => (el as HTMLInputElement).oninput = () => {
+    ui.startWith[el.dataset.startrate!] = Math.round(parseFloat((el as HTMLInputElement).value || "0") * 100);
+  });
+
   if ($("start")) $("start")!.onclick = () => go(async () => {
-    const clientId = ($("who") as unknown as HTMLSelectElement).value;
-    const payRate = Math.round(parseFloat($("rate")!.value) * 100);
+    const ids = Object.keys(ui.startWith);
+    if (!ids.length) throw new Error("Tick whoever is with you.");
     const now = nowInstant();
     await emit("shift", newId(), {
       startAt: now, endAt: null, occurredAt: now, recordedAt: now,
       zone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      participants: [{ clientId, payerPartyId: `payer-${clientId}`, inAt: now, outAt: now, payRate,
-        timeRule: clients.find((c) => c.id === clientId)?.defaultTimeRule ?? "fullPerPayer" }],
+      // Everyone who is there at the start, each on their own rate and their
+      // own billing rule. Anyone arriving later is added with their own inAt.
+      participants: ids.map((clientId) => ({
+        clientId, payerPartyId: `payer-${clientId}`, inAt: now, outAt: now,
+        payRate: ui.startWith[clientId],
+        timeRule: clients.find((c) => c.id === clientId)?.defaultTimeRule ?? "fullPerPayer",
+      })),
       isIncident: false, reimbursementStatus: "unclaimed", tags: [], customFields: {},
     });
+    ui.startWith = {};
   });
 
   if ($("end")) $("end")!.onclick = () => go(async () => {
