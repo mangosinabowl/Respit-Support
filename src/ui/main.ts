@@ -4,6 +4,8 @@ import { makeEvent, type DomainEvent } from "../domain/events";
 import { live } from "../domain/replay";
 import { owedByPayer } from "../domain/queries";
 import { expenseAsMinutes, splitByPercent } from "../domain/expenseTime";
+import { syncOnce } from "../store/sync";
+import { connectDrive, driveRemote } from "../store/googleDrive";
 import { newId, nowInstant } from "../domain/primitives";
 import { splitShiftAt, mergeShifts } from "../domain/operations";
 import type { Shift, Expense, Client } from "../domain/entities";
@@ -30,6 +32,7 @@ const ui = {
   expFor: {} as Record<string, number>,
   /** Kept across re-renders so ticking a person does not wipe what was typed. */
   draft: { desc: "", amt: "" },
+  sync: { token: null as string | null, busy: false, note: "" },
   view: { as: "me", clientId: "" } as { as: "me" | "guardian" | "payer" | "archived"; clientId: string },
   sort: { shifts: { key: "startAt", dir: -1 }, expenses: { key: "occurredAt", dir: -1 }, owed: { key: "unclaimed", dir: -1 } },
 };
@@ -246,6 +249,15 @@ async function render() {
                  <td class="n sub">${money(t.unclaimed)}</td><td class="n sub">${money(t.submitted)}</td><td class="n sub">${money(t.paid)}</td></tr>`).join("")}`;
         }).join("")}
       </table>` : `<p class="empty">Nothing owed yet.</p>`}
+    </section>
+
+    <section class="card">
+      <h2>Sync</h2>
+      <p class="sub">Every device keeps its own copy and writes its own file to your Drive, in a folder only this app can see. Sync publishes yours and takes in everyone else's, so all your devices end up showing the same thing.</p>
+      <div class="row">
+        <button id="syncNow" class="pink" ${ui.sync.busy ? "disabled" : ""}>${ui.sync.busy ? "Syncing…" : ui.sync.token ? "Sync now" : "Connect Google Drive"}</button>
+      </div>
+      <p class="msg">${ui.sync.note}</p>
     </section>
 
     <section class="card">
@@ -746,6 +758,29 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
   if ($("eamt")) $("eamt")!.oninput = () => { ui.draft.amt = $("eamt")!.value; preview(); };
   if ($("edesc")) $("edesc")!.oninput = () => { ui.draft.desc = $("edesc")!.value; };
   preview();
+
+  if ($("syncNow")) $("syncNow")!.onclick = () => go(async () => {
+    ui.sync.busy = true;
+    ui.sync.note = "";
+    render();
+    try {
+      // The token lives only in memory; a new one is requested when it lapses.
+      if (!ui.sync.token) ui.sync.token = await connectDrive(true);
+      const remote = driveRemote(async () => ui.sync.token!);
+      const r = await syncOnce(db, remote, dev);
+      const others = r.devicesSeen.length;
+      ui.sync.note = `Published ${r.pushed}, took in ${r.pulled}, already had ${r.skipped}. `
+        + (others ? `${others} other device${others === 1 ? "" : "s"} seen.` : "No other devices yet.")
+        + (r.conflicts.length ? ` ${r.conflicts.length} kept back as conflicts.` : "");
+    } catch (err: any) {
+      // A lapsed token looks like a Drive rejection; clear it so the next press
+      // signs in again rather than failing the same way.
+      ui.sync.token = null;
+      ui.sync.note = `Sync failed: ${err.message}`;
+    } finally {
+      ui.sync.busy = false;
+    }
+  });
 
   if ($("exp")) $("exp")!.onclick = async () => {
     const a = document.createElement("a");
