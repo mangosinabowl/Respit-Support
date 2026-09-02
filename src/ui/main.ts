@@ -35,13 +35,20 @@ const ui = {
   draft: { desc: "", amt: "" },
   tripFor: {} as Record<string, number>,
   tripDraft: { km: "", purpose: "", rate: "" },
-  sync: { token: null as string | null, busy: false, note: "" },
+  sync: {
+    token: null as string | null,
+    busy: false,
+    note: "",
+    /** Set when Google refuses silently, so we ask rather than popping windows. */
+    needsConnect: false,
+  },
   view: { as: "me", clientId: "" } as { as: "me" | "guardian" | "payer" | "archived"; clientId: string },
   sort: { shifts: { key: "startAt", dir: -1 }, expenses: { key: "occurredAt", dir: -1 }, owed: { key: "unclaimed", dir: -1 } },
 };
 
 async function emit(type: Parameters<typeof makeEvent>[0], id: string, fields: Record<string, unknown>) {
   await appendEvent(db, makeEvent(type, id, fields, dev, await nextSeq(db, dev)));
+  syncSoon();
 }
 async function emitAll(events: DomainEvent[]) { for (const e of events) await appendEvent(db, e); }
 
@@ -67,6 +74,44 @@ const ruleSelect = (id: string, value: string) =>
      <option value="splitEvenly"${value === "splitEvenly" ? " selected" : ""}>Splits the hour</option>
    </select>`;
 
+/**
+ * Google's sign-in lapses roughly 7 days after connecting while the app is in
+ * testing. The app already tracks time, so it can say so before sync quietly
+ * stops rather than after.
+ */
+const CONNECT_KEY = "respite.driveConnectedAt";
+const LAST_SYNC_KEY = "respite.lastSyncAt";
+const TOKEN_LIFE_DAYS = 7;
+
+function stamp(key: string) { try { localStorage.setItem(key, new Date().toISOString()); } catch { /* storage blocked */ } }
+function readStamp(key: string): Date | null {
+  try { const v = localStorage.getItem(key); return v ? new Date(v) : null; } catch { return null; }
+}
+const daysSince = (d: Date | null) => (d ? (Date.now() - d.getTime()) / 86400000 : Infinity);
+
+function agoText(d: Date | null): string {
+  if (!d) return "never";
+  const mins = Math.floor((Date.now() - d.getTime()) / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins} min ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
+}
+
+/** How close the Google connection is to lapsing, in plain words. */
+function connectionWarning(): { text: string; urgent: boolean } | null {
+  const connected = readStamp(CONNECT_KEY);
+  if (!connected) return null;
+  const left = TOKEN_LIFE_DAYS - daysSince(connected);
+  if (left <= 0) return { text: "Google sign-in has lapsed. Press Connect to sync again.", urgent: true };
+  if (left <= 2) {
+    const hours = Math.round(left * 24);
+    return { text: `Google sign-in lapses in about ${hours < 24 ? `${hours} hours` : "a day"}. Reconnect when convenient.`, urgent: true };
+  }
+  return { text: `Google sign-in good for about ${Math.floor(left)} more days.`, urgent: false };
+}
+
 const TRASH = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>`;
 
 /** A trash button that asks before it acts. */
@@ -74,6 +119,56 @@ const trash = (kind: string, id: string, label: string, what: string) =>
   `<button class="trash" title="Delete" data-ask="${kind}|${id}|${encodeURIComponent(label)}|${encodeURIComponent(what)}">${TRASH}</button>`;
 
 const arrow = (s: { key: string; dir: number }, k: string) => s.key === k ? `<span class="ar">${s.dir > 0 ? "\u25B2" : "\u25BC"}</span>` : "";
+
+
+/**
+ * One sync attempt. `interactive` decides whether we may open a sign-in window:
+ * automatic runs must never do that, or the app would pop windows at the user
+ * while they are trying to log a shift.
+ */
+async function runSync(interactive: boolean) {
+  if (ui.sync.busy) return;
+  ui.sync.busy = true;
+  if (interactive) { ui.sync.note = ""; render(); }
+  try {
+    if (!ui.sync.token) {
+      // Try to get a token without a prompt first; only ask if allowed to.
+      try {
+        ui.sync.token = await connectDrive(false);
+        stamp(CONNECT_KEY);
+      } catch {
+        if (!interactive) { ui.sync.needsConnect = true; return; }
+        ui.sync.token = await connectDrive(true);
+        stamp(CONNECT_KEY);
+      }
+    }
+    const remote = driveRemote(async () => ui.sync.token!);
+    const r = await syncOnce(db, remote, dev);
+    stamp(LAST_SYNC_KEY);
+    ui.sync.needsConnect = false;
+    const others = r.devicesSeen.length;
+    ui.sync.note = `Published ${r.pushed}, took in ${r.pulled}, already had ${r.skipped}. `
+      + (others ? `${others} other device${others === 1 ? "" : "s"} seen.` : "No other devices yet.")
+      + (r.conflicts.length ? ` ${r.conflicts.length} kept back as conflicts.` : "");
+  } catch (err: any) {
+    // A lapsed token looks like a refusal from Drive. Clear it so the next
+    // attempt signs in again, and say so rather than failing silently - a sync
+    // that stopped a week ago is worse than one you knew had stopped.
+    ui.sync.token = null;
+    ui.sync.needsConnect = true;
+    ui.sync.note = `Sync failed: ${err.message}. Press Connect Google Drive.`;
+  } finally {
+    ui.sync.busy = false;
+    render();
+  }
+}
+
+let syncTimer: ReturnType<typeof setTimeout> | undefined;
+/** Called after a change: waits for the flurry to finish, then publishes. */
+function syncSoon() {
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => { void runSync(false); }, 8000);
+}
 
 async function render() {
   const store = await hydrate(db);
@@ -110,10 +205,10 @@ async function render() {
 
   app.innerHTML = `
     <header><h1>Respite Support</h1><span class="dev">device ${dev.slice(0, 8)}</span></header>
-    <section class="card">
+    <section class="card view-${ui.view.as}">
       <h2>Viewing as</h2>
       <div class="row">
-        <select id="viewAs">
+        <select id="viewAs" class="view-${ui.view.as}">
           <option value="me"${ui.view.as === "me" ? " selected" : ""}>Me — everything</option>
           <option value="guardian"${ui.view.as === "guardian" ? " selected" : ""}>Guardian — one person only</option>
           <option value="payer"${ui.view.as === "payer" ? " selected" : ""}>Payer — expenses as extra time</option>
@@ -285,10 +380,13 @@ async function render() {
 
     <section class="card">
       <h2>Sync</h2>
-      <p class="sub">Every device keeps its own copy and writes its own file to your Drive, in a folder only this app can see. Sync publishes yours and takes in everyone else's, so all your devices end up showing the same thing.</p>
+      <p class="sub">Every device keeps its own copy and writes its own file to your Drive, in a folder only this app can see. It syncs on its own — when you open it, a few seconds after you change something, every few minutes while open, and when the connection comes back.</p>
       <div class="row">
-        <button id="syncNow" class="pink" ${ui.sync.busy ? "disabled" : ""}>${ui.sync.busy ? "Syncing…" : ui.sync.token ? "Sync now" : "Connect Google Drive"}</button>
+        <button id="syncNow" ${ui.sync.busy ? "disabled" : ""}>${ui.sync.busy ? "Syncing…" : "Sync now"}</button>
+        <button id="connectDrive" class="pink">${ui.sync.token ? "Reconnect Google" : "Connect Google Drive"}</button>
       </div>
+      <p class="sub">Last synced ${agoText(readStamp(LAST_SYNC_KEY))}.</p>
+      ${(() => { const w = connectionWarning(); return w ? `<p class="${w.urgent ? "msg urgent" : "sub"}">${w.text}</p>` : ""; })()}
       <p class="msg">${ui.sync.note}</p>
     </section>
 
@@ -320,7 +418,7 @@ function archivedView(people: Client[], shifts: Shift[], expenses: Expense[], ow
   const paidExpenses = expenses.filter((e) => e.archived || e.reimbursementStatus === "paid");
   const nothing = !people.length && !archivedShifts.length && !paidExpenses.length;
 
-  return `<section class="card">
+  return `<section class="card view-archived">
     <h2>Archived people</h2>
     <p class="sub">Not offered when starting a shift or splitting an expense. Anything still owed keeps showing in Owed until it is claimed.</p>
     ${people.length ? `<table><tbody>${people.map((c) => {
@@ -331,7 +429,7 @@ function archivedView(people: Client[], shifts: Shift[], expenses: Expense[], ow
     }).join("")}</tbody></table>` : `<p class="empty">Nobody archived.</p>`}
   </section>
 
-  <section class="card">
+  <section class="card view-archived">
     <h2>Archived shifts</h2>
     ${archivedShifts.length ? `<table><tbody>${archivedShifts.map((s) => `<tr>
       <td>${day(s.startAt)} ${hhmm(s.startAt)}${s.endAt ? `–${hhmm(s.endAt)}` : ""}<br>
@@ -340,7 +438,7 @@ function archivedView(people: Client[], shifts: Shift[], expenses: Expense[], ow
       : `<p class="empty">No archived shifts.</p>`}
   </section>
 
-  <section class="card">
+  <section class="card view-archived">
     <h2>Expenses paid</h2>
     <p class="sub">Settled and out of the way. They stay in the Paid column so the record still adds up.</p>
     ${paidExpenses.length ? `<table><tbody>${paidExpenses.map((e) => `<tr>
@@ -376,7 +474,7 @@ function shareView(as: "guardian" | "payer", clientId: string, shifts: Shift[], 
   const totalExtra = rows.reduce((t, r) => t + r.extra, 0) + expenseAsMinutes(looseTotal, rate);
   const totalMoney = rows.reduce((t, r) => t + Math.round(r.worked / 60 * r.p.payRate) + r.share, 0) + looseTotal;
 
-  return `<section class="card">
+  return `<section class="card view-${as}">
     <h2>${as === "guardian" ? "Guardian view" : "Payer view"} — ${who.name}</h2>
     <p class="sub">${as === "guardian"
       ? "Only this person is shown. Nothing about anyone else on the same shift is visible."
@@ -874,27 +972,13 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     ui.msg = "Marked paid.";
   }));
 
-  if ($("syncNow")) $("syncNow")!.onclick = () => go(async () => {
-    ui.sync.busy = true;
-    ui.sync.note = "";
-    render();
-    try {
-      // The token lives only in memory; a new one is requested when it lapses.
-      if (!ui.sync.token) ui.sync.token = await connectDrive(true);
-      const remote = driveRemote(async () => ui.sync.token!);
-      const r = await syncOnce(db, remote, dev);
-      const others = r.devicesSeen.length;
-      ui.sync.note = `Published ${r.pushed}, took in ${r.pulled}, already had ${r.skipped}. `
-        + (others ? `${others} other device${others === 1 ? "" : "s"} seen.` : "No other devices yet.")
-        + (r.conflicts.length ? ` ${r.conflicts.length} kept back as conflicts.` : "");
-    } catch (err: any) {
-      // A lapsed token looks like a Drive rejection; clear it so the next press
-      // signs in again rather than failing the same way.
-      ui.sync.token = null;
-      ui.sync.note = `Sync failed: ${err.message}`;
-    } finally {
-      ui.sync.busy = false;
-    }
+  if ($("syncNow")) $("syncNow")!.onclick = () => runSync(true);
+  if ($("connectDrive")) $("connectDrive")!.onclick = () => go(async () => {
+    ui.sync.token = await connectDrive(true);
+    ui.sync.needsConnect = false;
+    stamp(CONNECT_KEY);
+    ui.sync.note = "Connected.";
+    await runSync(false);
   });
 
   if ($("exp")) $("exp")!.onclick = async () => {
@@ -912,6 +996,12 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
   });
 }
 
-db.open().then(render).catch((err) => {
+db.open().then(async () => {
+  await render();
+  // On open, every few minutes while open, and whenever the connection returns.
+  void runSync(false);
+  setInterval(() => { void runSync(false); }, 5 * 60 * 1000);
+  window.addEventListener("online", () => { void runSync(false); });
+}).catch((err) => {
   app.innerHTML = `<div class="card"><h2>Could not open the local database</h2><pre>${err.message}</pre></div>`;
 });

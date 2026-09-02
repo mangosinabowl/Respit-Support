@@ -69,3 +69,16 @@ button.trash svg{width:17px;height:17px;display:block}
 button.confirm{background:var(--danger);color:#fff}
 .sub{color:var(--muted);font-size:12px}
 .sub{color:var(--muted);font-size:12px}
+.msg.urgent{color:#8a3520;background:var(--pink-soft)}
+
+/* Each view gets its own colour so it is obvious at a glance whose figures are
+   on screen - mistaking a guardian's view for your own would mean quoting the
+   wrong number to a family. */
+.view-me{background:var(--panel)}
+select.view-me{background:var(--panel)}
+.view-guardian{background:var(--pink-soft);border-left:4px solid var(--pink)}
+select.view-guardian{background:var(--pink-soft);border-color:var(--pink)}
+.view-payer{background:var(--cyan-soft);border-left:4px solid var(--cyan)}
+select.view-payer{background:var(--cyan-soft);border-color:var(--cyan)}
+.view-archived{background:var(--orange-soft);border-left:4px solid var(--orange)}
+select.view-archived{background:var(--orange-soft);border-color:var(--orange)}
