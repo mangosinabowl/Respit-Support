@@ -1,5 +1,6 @@
 import type { RespiteDb } from "../store/db";
 import type { DomainEvent } from "../domain/events";
+import { allocateTime } from "../domain/timeAllocation";
 
 /**
  * Demonstration data: three months of realistic work, for looking at the app
@@ -144,13 +145,69 @@ export async function seedDemoData(db: RespiteDb, deviceId: string): Promise<num
   put("adjustment", uid(), { payerPartyId: `payer-${rory.id}`, amountDelta: -1500, note: "Agreed goodwill discount for the late start on 1 Sept", ...meta(adjAt) }, adjAt);
   put("adjustment", uid(), { payerPartyId: `payer-${mia.id}`, amountDelta: 2000, note: "Agreed late finish on 5 Sept, two hours over", ...meta(adjAt) }, adjAt);
 
-  const paidAt = iso(2026, 8, 1, 10);
-  put("submission", uid(), {
-    kind: "invoice", payerPartyId: `payer-${rory.id}`, clientId: rory.id, clientName: "Rory",
-    issuedAt: iso(2026, 7, 28, 9), paidAt, amount: 18952,
-    time: 12000, expenses: 6000, mileage: 952, adjustments: 0,
-    covers: { shifts: [shifts[0].id, shifts[2].id], expenses: [], trips: [] }, ...meta(paidAt),
-  }, paidAt);
+  /**
+   * Invoices built from the records themselves, using the app's own allocation.
+   *
+   * They were written by hand before, with figures that did not match the work
+   * they claimed to cover - an invoice saying $120 of time against shifts worth
+   * $220 - and thirteen records marked "sent" that pointed at no invoice at
+   * all. A demonstration whose numbers do not reconcile teaches the wrong
+   * thing, and hides real arithmetic bugs behind fake ones.
+   */
+  const invoiceFor = (status: "paid" | "submitted", issued: string, paid: string | null) => {
+    const byPayer = new Map<string, { time: number; expenses: number; mileage: number; shifts: string[]; exps: string[]; trips: string[] }>();
+    const bucket = (payer: string) => {
+      if (!byPayer.has(payer)) byPayer.set(payer, { time: 0, expenses: 0, mileage: 0, shifts: [], exps: [], trips: [] });
+      return byPayer.get(payer)!;
+    };
+
+    for (const e of events) {
+      const f = e.fields as Record<string, any>;
+      if (f.reimbursementStatus !== status) continue;
+      if (e.entityType === "shift") {
+        for (const claim of allocateTime(f.participants)) {
+          const b = bucket(claim.payerPartyId);
+          b.time += claim.amount;
+          if (!b.shifts.includes(e.entityId)) b.shifts.push(e.entityId);
+        }
+      } else if (e.entityType === "expense") {
+        for (const sp of f.splits ?? []) {
+          const b = bucket(sp.payerPartyId);
+          b.expenses += sp.amount;
+          if (!b.exps.includes(e.entityId)) b.exps.push(e.entityId);
+        }
+      } else if (e.entityType === "trip") {
+        for (const sp of f.splits ?? []) {
+          const b = bucket(sp.payerPartyId);
+          b.mileage += sp.claimAmount;
+          if (!b.trips.includes(e.entityId)) b.trips.push(e.entityId);
+        }
+      }
+    }
+
+    for (const [payerPartyId, b] of byPayer) {
+      const clientId = payerPartyId.replace(/^payer-/, "");
+      const invoiceId = uid();
+      put("submission", invoiceId, {
+        kind: "invoice", payerPartyId, clientId,
+        clientName: people.find((p) => p.id === clientId)?.name ?? "Unknown",
+        issuedAt: issued, ...(paid ? { paidAt: paid } : {}),
+        amount: b.time + b.expenses + b.mileage,
+        time: b.time, expenses: b.expenses, mileage: b.mileage, adjustments: 0,
+        covers: { shifts: b.shifts, expenses: b.exps, trips: b.trips },
+        ...meta(issued),
+      }, issued);
+
+      // Stamp the records with the invoice they went out on, so bringing one
+      // back has something real to attach its redaction to.
+      for (const id of b.shifts) put("shift", id, { submissionId: invoiceId }, issued);
+      for (const id of b.exps) put("expense", id, { submissionId: invoiceId }, issued);
+      for (const id of b.trips) put("trip", id, { submissionId: invoiceId }, issued);
+    }
+  };
+
+  invoiceFor("paid", iso(2026, 7, 28, 9), iso(2026, 8, 1, 10));
+  invoiceFor("submitted", iso(2026, 9, 1, 9), null);
 
   // Replaces whatever is there. This is demonstration data, not something to
   // merge into real records.
