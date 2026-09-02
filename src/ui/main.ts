@@ -30,6 +30,10 @@ const hhmm = (s: string) => new Date(s).toLocaleTimeString("en-CA", { hour: "2-d
 const day = (s: string) => new Date(s).toLocaleDateString("en-CA", { month: "short", day: "numeric" });
 const forInput = (s: string) => { const d = new Date(s); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 16); };
 const fromInput = (v: string) => new Date(v).toISOString();
+/** Now, in the shape a datetime-local input wants. Every date field starts here
+ *  so the common case is one tap, and is editable for anything entered later. */
+const nowLocal = () => forInput(nowInstant());
+const todayLocal = () => forInput(nowInstant()).slice(0, 10);
 const mins = (a: string, b: string) => Math.max(0, Math.round((Date.parse(b) - Date.parse(a)) / 60000));
 const dur = (m: number) => `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
 
@@ -42,7 +46,9 @@ const ui = {
   /** Who a new expense is for, by client id, and each one's percentage share. */
   expFor: {} as Record<string, number>,
   /** Kept across re-renders so ticking a person does not wipe what was typed. */
-  draft: { desc: "", amt: "" },
+  draft: { desc: "", amt: "", when: "" },
+  draftShift: { from: "", to: "" },
+  tripWhen: "",
   tripFor: {} as Record<string, number>,
   /** Shares being edited on an existing expense, seeded from what it already has. */
   editSplit: {} as Record<string, number>,
@@ -310,8 +316,8 @@ async function render() {
       ${clients.length ? `<p class="sub">For a shift you did not time on the day. Add anyone else who was there, with their own hours, once it is created.</p>
       <div class="row">
         <select id="pastWho">${clients.map((c) => `<option value="${c.id}">${c.name}</option>`).join("")}</select>
-        <input id="pastFrom" type="datetime-local" title="Started" />
-        <input id="pastTo" type="datetime-local" title="Ended" />
+        <input id="pastFrom" type="datetime-local" title="Started" value="${ui.draftShift.from || nowLocal()}" />
+        <input id="pastTo" type="datetime-local" title="Ended" value="${ui.draftShift.to || nowLocal()}" />
         <button id="logPast" class="ghost">Log it</button>
       </div>` : `<p class="empty">Add someone you support first.</p>`}
     </section>
@@ -344,7 +350,7 @@ async function render() {
         ${shiftRows.map((r) => `<tr class="click ${ui.openShift === r.id ? "open" : ""}" data-shift="${r.id}">
             <td>${day(r.startAt)} ${hhmm(r.startAt)}\u2013${hhmm(r.endAt)}</td>
             <td>${r.people}${(() => { const sh = allShifts.find((s) => s.id === r.id)!; return sh.rejected
-              ? `<span class="pill warn" title="${sh.rejected.reason ?? "Not paid"}">came back off an invoice</span>` : ""; })()}
+              ? `<span class="pill warn" title="${sh.rejected.reason ?? "Came off an earlier invoice unpaid"}">still unpaid</span>` : ""; })()}
               ${problems(checkShift(allShifts.find((s) => s.id === r.id)!))}</td>
             <td class="n">${dur(r.minutes)}</td><td class="n">${money(r.pay)}</td></tr>`).join("")}
       </table>` : `<p class="empty">No finished shifts yet.</p>`}
@@ -383,14 +389,14 @@ async function render() {
                    <label class="file tiny">${shots.length ? "Add another" : "Add receipt"}<input type="file" accept="image/*" capture="environment" data-shot="${ex.id}" hidden /></label></div>`;
                })()}
                ${(() => { const ex = expenses.find((x) => x.id === e.id)!; return ex.rejected
-                 ? `<span class="pill warn" title="${ex.rejected.reason ?? "Not paid"}">came back off an invoice</span>` : ""; })()}
+                 ? `<span class="pill warn" title="${ex.rejected.reason ?? "Came off an earlier invoice unpaid"}">still unpaid</span>` : ""; })()}
                ${problems(checkExpense(expenses.find((x) => x.id === e.id)!))}</td>
              <td>${day(e.occurredAt)}</td><td class="n">${money(e.totalAmount)}</td>
              <td class="n"><button class="tiny ghost" data-edit="${e.id}">Edit</button>
              <button class="tiny ghost" data-paid="${e.id}">Mark paid</button>
              ${trash("expense", e.id, `${e.description} (${money(e.totalAmount)})`, "expense")}</td></tr>`).join("")}
       </table>` : `<p class="empty">None yet.</p>`}
-      <div class="row"><input id="edesc" placeholder="What for?" value="${ui.draft.desc}" /><input id="eamt" type="number" placeholder="0.00" step="0.01" style="max-width:130px" value="${ui.draft.amt}" /></div>
+      <div class="row"><input id="edesc" placeholder="What for?" value="${ui.draft.desc}" /><input id="eamt" type="number" placeholder="0.00" step="0.01" style="max-width:130px" value="${ui.draft.amt}" /><input id="ewhen" type="datetime-local" title="When" value="${ui.draft.when || nowLocal()}" style="max-width:200px" /></div>
       ${clients.length ? `<p class="sub" style="margin:10px 0 4px">Who was it for? Shares must add up to 100%.</p>
       <table><tbody>${clients.map((c) => {
         const on = ui.expFor[c.id] !== undefined;
@@ -410,6 +416,7 @@ async function render() {
         <select id="tunit" style="max-width:80px"><option value="km">km</option><option value="mi">mi</option></select>
         <input id="tpurpose" placeholder="Where to?" value="${ui.tripDraft.purpose}" />
         <input id="trate" type="number" step="0.01" placeholder="c/unit" value="${ui.tripDraft.rate}" style="max-width:110px" title="cents per km/mi" />
+        <input id="twhen" type="datetime-local" title="When" value="${ui.tripWhen || nowLocal()}" style="max-width:200px" />
       </div>
       <p class="sub" style="margin:10px 0 4px">Who was in the car? Shares must add up to 100%.</p>
       <table><tbody>${clients.map((c) => {
@@ -424,11 +431,52 @@ async function render() {
       <p class="sub">Fuel at the pump is not claimed - mileage already covers running the car, so claiming both would bill the same cost twice.</p>
       ${trips.length ? `<table style="margin-top:10px">
         ${trips.map((t) => `<tr><td>${t.purpose || "Trip"}<br><span class="sub">${day(t.occurredAt)} · ${t.distance}${t.distanceUnit} · ${t.splits.map((sp) => `${name(sp.clientId)} ${money(sp.claimAmount)}`).join(" · ")}</span>
-          ${t.rejected ? `<span class="pill warn" title="${t.rejected.reason ?? "Not paid"}">came back off an invoice</span>` : ""}${problems(checkTrip(t))}</td>
+          ${t.rejected ? `<span class="pill warn" title="${t.rejected.reason ?? "Came off an earlier invoice unpaid"}">still unpaid</span>` : ""}${problems(checkTrip(t))}</td>
           <td class="n">${money(t.splits.reduce((a, sp) => a + sp.claimAmount, 0))}</td>
           <td class="n">${trash("trip", t.id, `${t.purpose || "Trip"} (${t.distance}${t.distanceUnit})`, "trip")}</td></tr>`).join("")}
       </table>` : `<p class="empty">No trips yet.</p>`}` : `<p class="empty">Add someone you support first.</p>`}
     </section>
+
+    ${(() => {
+      const stuck = [
+        ...allShifts.filter((x) => x.rejected).map((x) => ({ kind: "shift" as const, r: x as any, when: x.startAt, what: `Shift, ${x.participants.map((p) => name(p.clientId)).join(", ")}` })),
+        ...expenses.filter((x) => x.rejected).map((x) => ({ kind: "expense" as const, r: x as any, when: x.occurredAt, what: x.description || "Expense" })),
+        ...trips.filter((x) => x.rejected).map((x) => ({ kind: "trip" as const, r: x as any, when: x.occurredAt, what: `${x.purpose || "Trip"}, ${x.distance}${x.distanceUnit}` })),
+      ].sort((a, b) => a.when.localeCompare(b.when));
+      if (!stuck.length) return "";
+      return `<section class="card">
+        <h2>Still unpaid</h2>
+        <p class="sub">Claimed once and the money never came. They stay here until they are paid, and can be put on any future invoice — or attached to another shift for the same person, so they go out with work that is being claimed anyway.</p>
+        <table>
+          <tr><th>When</th><th>What</th><th>Why it came back</th><th>Move it</th></tr>
+          ${stuck.map((s) => {
+            const clientIds: string[] = s.kind === "shift"
+              ? s.r.participants.map((p: any) => p.clientId)
+              : s.r.splits.map((sp: any) => sp.clientId);
+            // Only shifts that already include the same person: attaching a
+            // receipt to a shift that person was not on would invoice the
+            // wrong payer for it.
+            const targets = allShifts.filter((sh) => sh.id !== s.r.id && sh.participants.some((p) => clientIds.includes(p.clientId)));
+            return `<tr>
+              <td>${day(s.when)}</td>
+              <td>${s.what}<br><span class="sub">${clientIds.map(name).join(", ")}</span></td>
+              <td><span class="sub">${s.r.rejected.reason ?? "no reason recorded"}<br>${day(s.r.rejected.reopenedAt)}</span></td>
+              <td>${s.kind === "shift"
+                ? `<span class="sub">goes on the next invoice for whoever was on it</span>`
+                : targets.length
+                  ? `<select data-rehome-target="${s.r.id}" style="max-width:190px">
+                       <option value="">Leave it on its own</option>
+                       ${targets.map((sh) => `<option value="${sh.id}"${s.r.shiftId === sh.id ? " selected" : ""}>${day(sh.startAt)} ${hhmm(sh.startAt)} · ${sh.participants.map((p) => name(p.clientId)).join(", ")}</option>`).join("")}
+                     </select>
+                     <button class="tiny ghost" data-rehome="${s.kind}:${s.r.id}">Move</button>`
+                  : `<span class="sub">no other shift with ${clientIds.map(name).join(" or ")} on it</span>`}</td>
+            </tr>`;
+          }).join("")}
+        </table>
+        <p class="sub">Clearing the note removes the flag once something is settled or written off.
+          ${stuck.length} item${stuck.length === 1 ? "" : "s"} waiting.</p>
+      </section>`;
+    })()}
 
     <section class="card">
       <h2>Owed</h2>
@@ -621,7 +669,7 @@ function everyoneView(as: "guardian" | "payer", clients: Client[], shifts: Shift
         l.status === "submitted" ? `<span class="pill warn" title="Already sent to the payer and not yet paid">sent, unpaid</span>` : ""}${
         (() => {
           const rec = [...shifts, ...expenses, ...trips].find((r: any) => r.id === l.sourceId) as any;
-          return rec?.rejected ? `<span class="pill warn" title="${rec.rejected.reason ?? "Not paid"}">refused before</span>` : "";
+          return rec?.rejected ? `<span class="pill warn" title="${rec.rejected.reason ?? "Came off an earlier invoice unpaid"}">still unpaid</span>` : "";
         })()}</td>
           <td class="n">${money(l.amount)}</td></tr>`).join("")}
         ${inv.time && as !== "payer" ? `<tr><td></td><td class="sub">Time</td><td class="n sub">${money(inv.time)}</td></tr>` : ""}
@@ -718,7 +766,7 @@ function shareView(as: "guardian" | "payer", clientId: string, shifts: Shift[], 
         l.status === "submitted" ? `<span class="pill warn" title="Already sent to the payer and not yet paid">sent, unpaid</span>` : ""}${
         (() => {
           const rec = [...shifts, ...expenses, ...trips].find((r: any) => r.id === l.sourceId) as any;
-          return rec?.rejected ? `<span class="pill warn" title="${rec.rejected.reason ?? "Not paid"}">refused before</span>` : "";
+          return rec?.rejected ? `<span class="pill warn" title="${rec.rejected.reason ?? "Came off an earlier invoice unpaid"}">still unpaid</span>` : "";
         })()}</td>
       <td class="n">${money(l.amount)}</td>
     </tr>`).join("");
@@ -783,7 +831,7 @@ function shareView(as: "guardian" | "payer", clientId: string, shifts: Shift[], 
     </div>
 
     <h3 style="margin-top:16px">Adjustments</h3>
-    <p class="sub">A late change to what is invoiced. The shift or receipt itself is untouched — it stays a record of what happened. A final invoice folds these into the total; a draft shows them.</p>
+    <p class="sub">A late change to what is invoiced, up or down: a goodwill discount, or an agreed top-up for a late finish. The shift or receipt itself is untouched — it stays a record of what happened. A final invoice folds these into the total; a draft shows them.</p>
     ${adjustments.filter((a) => a.payerPartyId === `payer-${clientId}`).length
       ? `<table><tbody>${adjustments.filter((a) => a.payerPartyId === `payer-${clientId}`).map((a) => `<tr>
           <td>${a.note || "Adjustment"}<br><span class="sub">${day(a.occurredAt)}</span></td>
@@ -792,7 +840,8 @@ function shareView(as: "guardian" | "payer", clientId: string, shifts: Shift[], 
       : `<p class="empty">None.</p>`}
     <div class="row">
       <input id="adjNote" placeholder="Reason, e.g. agreed discount" />
-      <input id="adjAmt" type="number" step="0.01" placeholder="-5.00" style="max-width:120px" title="Negative reduces the invoice" />
+      <input id="adjAmt" type="number" step="0.01" placeholder="e.g. -5.00 or 20.00" style="max-width:170px" title="Positive adds to the invoice, negative takes off it" />
+      <input id="adjWhen" type="datetime-local" value="${nowLocal()}" style="max-width:190px" title="When" />
       <button class="tiny" data-add-adj="${clientId}">Add</button>
     </div>
 
@@ -801,11 +850,19 @@ function shareView(as: "guardian" | "payer", clientId: string, shifts: Shift[], 
         ? `<button class="tiny" data-submit="payer-${clientId}">Mark this invoice sent</button>` : ""}
       <button class="tiny pink" data-mark-paid="payer-${clientId}">Mark this invoice paid</button>
       ${invoice.lines.some((l) => l.status === "submitted")
-        ? `<input id="unsendWhy" placeholder="Why were these not paid?" style="max-width:260px" />
+        ? `<input id="unsendWhy" placeholder="Why not paid? e.g. funding ran out, invoice lost, still chasing" list="whyList" style="max-width:260px" />
+           <datalist id="whyList">
+             <option value="Payer disputed it"></option>
+             <option value="Funding ran out for the period"></option>
+             <option value="Invoice never arrived, resending"></option>
+             <option value="Still chasing, no reply"></option>
+             <option value="My mistake, needs redoing"></option>
+             <option value="Paid in part only"></option>
+           </datalist>
            <button class="tiny ghost" data-unsend="payer-${clientId}">Bring the unpaid ones back</button>` : ""}
     </div>
     ${invoice.lines.some((l) => l.status === "submitted")
-      ? `<p class="sub">Lines marked <b>sent, unpaid</b> went out on an earlier invoice and were never paid. They stay claimable and appear here until they are, so they can go on this invoice too — or bring them back to unclaimed to start again.</p>` : ""}` : ""}` : ""}
+      ? `<p class="sub">Lines marked <b>sent, unpaid</b> went out on an earlier invoice and the money has not arrived. That need not be a refusal — funding running out, a lost invoice or a payer gone quiet all look the same from here. They stay claimable and appear until they are paid, so they can go on this invoice too, or come back to unclaimed with a note saying what happened.</p>` : ""}` : ""}` : ""}
 
     <div class="grid" style="margin-top:12px">
       ${as === "payer"
@@ -1006,7 +1063,8 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
         payRate: c?.defaultRate ?? 0, timeRule: c?.defaultTimeRule ?? "fullPerPayer" }],
       isIncident: false, reimbursementStatus: "unclaimed", tags: [], customFields: {},
     });
-    ui.msg = "Past shift logged. Open it to add anyone else who was there.";
+    ui.draftShift = { from: "", to: "" };
+    ui.msg = "Shift logged. Open it to add anyone else who was there.";
   });
 
   all("[data-arch-shift]", (el) => el.onclick = (e) => {
@@ -1322,12 +1380,13 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     const parts = splitByPercent(cents, ids.map((id) => ui.expFor[id]));
     await emit("expense", newId(), {
       description: $("edesc")!.value || "Expense", totalAmount: cents, category: "other",
-      occurredAt: nowInstant(), recordedAt: nowInstant(), shiftId: open?.id ?? null,
+      // occurredAt is when it happened, recordedAt is when it was typed in.
+      occurredAt: fromInput($("ewhen")!.value), recordedAt: nowInstant(), shiftId: open?.id ?? null,
       receiptAttachmentIds: [], reimbursementStatus: "unclaimed",
       splits: ids.map((id, i) => ({ clientId: id, payerPartyId: `payer-${id}`, amount: parts[i] })),
     });
     ui.expFor = {};
-    ui.draft = { desc: "", amt: "" };
+    ui.draft = { desc: "", amt: "", when: "" };
   });
 
   // Ticking someone in or out re-splits the remaining shares evenly.
@@ -1373,6 +1432,13 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     });
   }
   if ($("eamt")) $("eamt")!.oninput = () => { ui.draft.amt = $("eamt")!.value; preview(); };
+  if ($("ewhen")) $("ewhen")!.onchange = () => { ui.draft.when = $("ewhen")!.value; };
+  if ($("twhen")) $("twhen")!.onchange = () => { ui.tripWhen = $("twhen")!.value; };
+  for (const id of ["pastFrom", "pastTo"]) {
+    if ($(id)) $(id)!.onchange = () => {
+      ui.draftShift[id === "pastFrom" ? "from" : "to"] = $(id)!.value;
+    };
+  }
   if ($("edesc")) $("edesc")!.oninput = () => { ui.draft.desc = $("edesc")!.value; };
   preview();
 
@@ -1422,7 +1488,7 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     await emit("trip", newId(), {
       distance, distanceUnit: ($("tunit") as unknown as HTMLSelectElement).value,
       purpose: $("tpurpose")!.value || "Trip", isClaimable: true,
-      occurredAt: nowInstant(), recordedAt: nowInstant(),
+      occurredAt: fromInput($("twhen")!.value), recordedAt: nowInstant(),
       zone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       shiftId: open?.id ?? null, reimbursementStatus: "unclaimed", tags: [], customFields: {},
       // distanceShare is this person's kilometres, not their percentage: the
@@ -1574,15 +1640,25 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
 
   all("[data-add-adj]", (el) => el.onclick = () => go(async () => {
     const amount = Math.round(parseFloat($("adjAmt")!.value || "0") * 100);
-    if (!amount) throw new Error("Enter an amount. Negative reduces the invoice.");
+    if (!amount) throw new Error("Enter an amount: a positive figure adds to the invoice, a negative one takes off it.");
     await emit("adjustment", newId(), {
       payerPartyId: `payer-${el.dataset.addAdj!}`,
       amountDelta: amount,
       note: $("adjNote")!.value.trim() || "Adjustment",
-      occurredAt: nowInstant(), recordedAt: nowInstant(),
+      occurredAt: fromInput(($("adjWhen") as HTMLInputElement).value), recordedAt: nowInstant(),
       zone: Intl.DateTimeFormat().resolvedOptions().timeZone, tags: [], customFields: {},
     });
     ui.msg = "Adjustment added. The original records are unchanged.";
+  }));
+
+  all("[data-rehome]", (el) => el.onclick = () => go(async () => {
+    const [kind, id] = el.dataset.rehome!.split(":") as ["expense" | "trip", string];
+    const sel = document.querySelector(`[data-rehome-target="${id}"]`) as HTMLSelectElement | null;
+    const shiftId = sel?.value || null;
+    await emit(kind, id, { shiftId });
+    ui.msg = shiftId
+      ? "Moved. It will go out with that shift's next invoice."
+      : "Left on its own. It will go on the next invoice for whoever it is for.";
   }));
 
   all("[data-unsend]", (el) => el.onclick = () => go(async () => {
@@ -1629,7 +1705,7 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
           expenses: items.filter((i) => i.type === "expense").map((i) => i.id),
           trips: items.filter((i) => i.type === "trip").map((i) => i.id),
         },
-        note: reason || "Pulled back off the invoice, not paid.",
+        note: reason || "Came back off the invoice, unpaid.",
         occurredAt: at, recordedAt: at,
         zone: Intl.DateTimeFormat().resolvedOptions().timeZone, tags: [], customFields: {},
       });

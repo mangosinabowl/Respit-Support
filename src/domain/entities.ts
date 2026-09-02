@@ -228,14 +228,19 @@ export interface Submission extends BaseRecord {
 }
 
 /**
- * Where a record has already been claimed and refused.
+ * A record that was claimed once and did not get paid.
+ *
+ * Refusal is only one way that happens: an invoice can be lost, a payer can go
+ * quiet, funding can run out mid-period, or the claim can simply have been
+ * wrong and need redoing. The reason is free text for that, and nothing here
+ * assumes fault on either side.
  *
  * Carried on the shift, expense or trip itself so it travels with the thing:
  * months later the question is "why is this still unpaid", and the answer has
  * to be attached to the item, not buried in an invoice it is no longer on.
  */
 export interface ClaimHistory {
-  /** The invoice it was refused off. */
+  /** The invoice it came off. */
   fromSubmissionId: Id;
   reopenedAt: ISOInstant;
   reason?: string;
