@@ -595,9 +595,11 @@ function everyoneView(as: "guardian" | "payer", clients: Client[], shifts: Shift
           <td>${l.detail}${l.quantity ? `<br><span class="sub">${l.quantity}</span>` : ""}${
         l.status === "submitted" ? `<span class="pill warn" title="Already sent to the payer and not yet paid">sent, unpaid</span>` : ""}</td>
           <td class="n">${money(l.amount)}</td></tr>`).join("")}
-        <tr><td></td><td class="sub">Time</td><td class="n sub">${money(inv.time)}</td></tr>
-        <tr><td></td><td class="sub">Expenses</td><td class="n sub">${money(inv.expenses)}</td></tr>
-        <tr><td></td><td class="sub">Mileage</td><td class="n sub">${money(inv.mileage)}</td></tr>
+        ${inv.time && as !== "payer" ? `<tr><td></td><td class="sub">Time</td><td class="n sub">${money(inv.time)}</td></tr>` : ""}
+        ${as === "payer"
+          ? ""
+          : `${inv.expenses ? `<tr><td></td><td class="sub">Expenses</td><td class="n sub">${money(inv.expenses)}</td></tr>` : ""}
+             ${inv.mileage ? `<tr><td></td><td class="sub">Mileage</td><td class="n sub">${money(inv.mileage)}</td></tr>` : ""}`}
         ${inv.adjustments ? `<tr><td></td><td class="sub">Adjustments</td><td class="n sub">${money(inv.adjustments)}</td></tr>` : ""}
         <tr><td></td><td><b>Total</b></td><td class="n"><b>${money(inv.total)}</b></td></tr>
       </table>
@@ -711,12 +713,29 @@ function shareView(as: "guardian" | "payer", clientId: string, shifts: Shift[], 
     ${invoice.lines.length ? `<table>
       <tr>${as === "payer" ? "<th></th>" : ""}<th>When</th><th>What</th><th class="n">Amount</th></tr>
       ${lineRows}
-      ${(() => { const pad = as === "payer" ? "<td></td>" : ""; return `
-      <tr>${pad}<td></td><td><b>Time</b></td><td class="n"><b>${money(invoice.time)}</b></td></tr>
-      <tr>${pad}<td></td><td><b>Expenses</b></td><td class="n"><b>${money(invoice.expenses)}</b></td></tr>
-      <tr>${pad}<td></td><td><b>Mileage</b></td><td class="n"><b>${money(invoice.mileage)}</b></td></tr>
-      ${invoice.adjustments ? `<tr>${pad}<td></td><td><b>Adjustments</b></td><td class="n"><b>${money(invoice.adjustments)}</b></td></tr>` : ""}
-      <tr>${pad}<td></td><td><b>Total</b></td><td class="n"><b>${money(invoice.total)}</b></td></tr>`; })()}
+      ${(() => {
+        const pad = as === "payer" ? "<td></td>" : "";
+        const row = (label: string, value: string) => `<tr>${pad}<td></td><td><b>${label}</b></td><td class="n"><b>${value}</b></td></tr>`;
+        if (as === "payer") {
+          // A payer funds hours, so outlay is shown as the time it is worth,
+          // not as a second money line they were never going to reimburse.
+          // Empty rows are left out entirely rather than printed as $0.00.
+          // Only an adjustment belongs here. Expenses and mileage are already
+          // carried as time in the lines above and in the "or" figure below;
+          // repeating them as money would be the same claim stated twice.
+          return [
+            invoice.adjustments ? row("Adjustments", money(invoice.adjustments)) : "",
+            row("Total", money(invoice.total)),
+          ].join("");
+        }
+        return [
+          invoice.time ? row("Time", money(invoice.time)) : "",
+          invoice.expenses ? row("Expenses", money(invoice.expenses)) : "",
+          invoice.mileage ? row("Mileage", money(invoice.mileage)) : "",
+          invoice.adjustments ? row("Adjustments", money(invoice.adjustments)) : "",
+          row("Total", money(invoice.total)),
+        ].join("");
+      })()}
     </table>
     ${omitted.length ? `<p class="sub">Left off this invoice, still owed: ${omitted.length} item${omitted.length === 1 ? "" : "s"}.
       <button class="tiny ghost" id="pickAll2">Put them back</button></p>` : ""}`
@@ -763,9 +782,9 @@ function shareView(as: "guardian" | "payer", clientId: string, shifts: Shift[], 
                : `<span class="sub" style="margin-top:4px">no hourly rate set, so no time equivalent</span>`}</div>
            <div class="stat"><b>${money(invoice.total)}</b><span>total owed</span></div>`
         : `<div class="stat"><b>${dur(totalWorked)}</b><span>time</span></div>
-           <div class="stat"><b>${money(invoice.time)}</b><span>support</span></div>
-           <div class="stat"><b>${money(invoice.expenses)}</b><span>expenses</span></div>
-           <div class="stat"><b>${money(invoice.mileage)}</b><span>mileage</span></div>
+           ${invoice.time ? `<div class="stat"><b>${money(invoice.time)}</b><span>support</span></div>` : ""}
+           ${invoice.expenses ? `<div class="stat"><b>${money(invoice.expenses)}</b><span>expenses</span></div>` : ""}
+           ${invoice.mileage ? `<div class="stat"><b>${money(invoice.mileage)}</b><span>mileage</span></div>` : ""}
            <div class="stat"><b>${money(invoice.total)}</b><span>total owed</span></div>`}
     </div>
   </section>`;

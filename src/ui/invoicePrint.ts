@@ -33,9 +33,9 @@ function page(inv: Invoice, draft: boolean, issued: string): string {
     </table>
 
     <table class="inv-sum">
-      <tr><td>Support time</td><td class="r">${cash(inv.time)}</td></tr>
-      <tr><td>Expenses</td><td class="r">${cash(inv.expenses)}</td></tr>
-      <tr><td>Mileage</td><td class="r">${cash(inv.mileage)}</td></tr>
+      ${inv.time ? `<tr><td>Support time</td><td class="r">${cash(inv.time)}</td></tr>` : ""}
+      ${inv.expenses ? `<tr><td>Expenses</td><td class="r">${cash(inv.expenses)}</td></tr>` : ""}
+      ${inv.mileage ? `<tr><td>Mileage</td><td class="r">${cash(inv.mileage)}</td></tr>` : ""}
       ${inv.adjustments ? `<tr><td>Adjustments</td><td class="r">${cash(inv.adjustments)}</td></tr>` : ""}
       <tr class="grand"><td>Total due</td><td class="r">${cash(inv.total)}</td></tr>
     </table>

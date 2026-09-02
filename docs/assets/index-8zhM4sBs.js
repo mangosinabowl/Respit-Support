@@ -19,9 +19,9 @@ var e=Object.create,t=Object.defineProperty,n=Object.getOwnPropertyDescriptor,r=
     </table>
 
     <table class="inv-sum">
-      <tr><td>Support time</td><td class="r">${Se(e.time)}</td></tr>
-      <tr><td>Expenses</td><td class="r">${Se(e.expenses)}</td></tr>
-      <tr><td>Mileage</td><td class="r">${Se(e.mileage)}</td></tr>
+      ${e.time?`<tr><td>Support time</td><td class="r">${Se(e.time)}</td></tr>`:``}
+      ${e.expenses?`<tr><td>Expenses</td><td class="r">${Se(e.expenses)}</td></tr>`:``}
+      ${e.mileage?`<tr><td>Mileage</td><td class="r">${Se(e.mileage)}</td></tr>`:``}
       ${e.adjustments?`<tr><td>Adjustments</td><td class="r">${Se(e.adjustments)}</td></tr>`:``}
       <tr class="grand"><td>Total due</td><td class="r">${Se(e.total)}</td></tr>
     </table>
@@ -353,9 +353,9 @@ var e=Object.create,t=Object.defineProperty,n=Object.getOwnPropertyDescriptor,r=
         ${n.lines.map(e=>`<tr><td>${U(e.when)}</td>
           <td>${e.detail}${e.quantity?`<br><span class="sub">${e.quantity}</span>`:``}${e.status===`submitted`?`<span class="pill warn" title="Already sent to the payer and not yet paid">sent, unpaid</span>`:``}</td>
           <td class="n">${V(e.amount)}</td></tr>`).join(``)}
-        <tr><td></td><td class="sub">Time</td><td class="n sub">${V(n.time)}</td></tr>
-        <tr><td></td><td class="sub">Expenses</td><td class="n sub">${V(n.expenses)}</td></tr>
-        <tr><td></td><td class="sub">Mileage</td><td class="n sub">${V(n.mileage)}</td></tr>
+        ${n.time&&e!==`payer`?`<tr><td></td><td class="sub">Time</td><td class="n sub">${V(n.time)}</td></tr>`:``}
+        ${e===`payer`?``:`${n.expenses?`<tr><td></td><td class="sub">Expenses</td><td class="n sub">${V(n.expenses)}</td></tr>`:``}
+             ${n.mileage?`<tr><td></td><td class="sub">Mileage</td><td class="n sub">${V(n.mileage)}</td></tr>`:``}`}
         ${n.adjustments?`<tr><td></td><td class="sub">Adjustments</td><td class="n sub">${V(n.adjustments)}</td></tr>`:``}
         <tr><td></td><td><b>Total</b></td><td class="n"><b>${V(n.total)}</b></td></tr>
       </table>
@@ -387,12 +387,7 @@ var e=Object.create,t=Object.defineProperty,n=Object.getOwnPropertyDescriptor,r=
     ${v.lines.length?`<table>
       <tr>${e===`payer`?`<th></th>`:``}<th>When</th><th>What</th><th class="n">Amount</th></tr>
       ${S}
-      ${(()=>{let t=e===`payer`?`<td></td>`:``;return`
-      <tr>${t}<td></td><td><b>Time</b></td><td class="n"><b>${V(v.time)}</b></td></tr>
-      <tr>${t}<td></td><td><b>Expenses</b></td><td class="n"><b>${V(v.expenses)}</b></td></tr>
-      <tr>${t}<td></td><td><b>Mileage</b></td><td class="n"><b>${V(v.mileage)}</b></td></tr>
-      ${v.adjustments?`<tr>${t}<td></td><td><b>Adjustments</b></td><td class="n"><b>${V(v.adjustments)}</b></td></tr>`:``}
-      <tr>${t}<td></td><td><b>Total</b></td><td class="n"><b>${V(v.total)}</b></td></tr>`})()}
+      ${(()=>{let t=e===`payer`?`<td></td>`:``,n=(e,n)=>`<tr>${t}<td></td><td><b>${e}</b></td><td class="n"><b>${n}</b></td></tr>`;return e===`payer`?[v.adjustments?n(`Adjustments`,V(v.adjustments)):``,n(`Total`,V(v.total))].join(``):[v.time?n(`Time`,V(v.time)):``,v.expenses?n(`Expenses`,V(v.expenses)):``,v.mileage?n(`Mileage`,V(v.mileage)):``,v.adjustments?n(`Adjustments`,V(v.adjustments)):``,n(`Total`,V(v.total))].join(``)})()}
     </table>
     ${C.length?`<p class="sub">Left off this invoice, still owed: ${C.length} item${C.length===1?``:`s`}.
       <button class="tiny ghost" id="pickAll2">Put them back</button></p>`:``}`:`<p class="empty">${G.pick.from||G.pick.to||C.length?`Nothing in that selection.`:`Nothing recorded for ${u.name} yet.`}</p>`}
@@ -429,9 +424,9 @@ var e=Object.create,t=Object.defineProperty,n=Object.getOwnPropertyDescriptor,r=
            <div class="stat two-ways"><b>${V(b)}</b><span>expenses and mileage</span>
              ${h>0?`<em>or</em><b>+${Et(x)}</b><span>at ${V(h)}/hr</span>`:`<span class="sub" style="margin-top:4px">no hourly rate set, so no time equivalent</span>`}</div>
            <div class="stat"><b>${V(v.total)}</b><span>total owed</span></div>`:`<div class="stat"><b>${Et(y)}</b><span>time</span></div>
-           <div class="stat"><b>${V(v.time)}</b><span>support</span></div>
-           <div class="stat"><b>${V(v.expenses)}</b><span>expenses</span></div>
-           <div class="stat"><b>${V(v.mileage)}</b><span>mileage</span></div>
+           ${v.time?`<div class="stat"><b>${V(v.time)}</b><span>support</span></div>`:``}
+           ${v.expenses?`<div class="stat"><b>${V(v.expenses)}</b><span>expenses</span></div>`:``}
+           ${v.mileage?`<div class="stat"><b>${V(v.mileage)}</b><span>mileage</span></div>`:``}
            <div class="stat"><b>${V(v.total)}</b><span>total owed</span></div>`}
     </div>
   </section>`}function qt(){let e=G.confirm;if(!e)return``;if(e.what===`payment`)return`<div class="overlay" data-close-modal="1"><div class="modal">
