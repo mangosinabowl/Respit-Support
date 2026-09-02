@@ -3,6 +3,7 @@ import { RespiteDb, appendEvent, hydrate, nextSeq, deviceId, exportEventLog, imp
 import { makeEvent, type DomainEvent } from "../domain/events";
 import { live } from "../domain/replay";
 import { owedByPayer } from "../domain/queries";
+import { expenseAsMinutes, splitByPercent } from "../domain/expenseTime";
 import { newId, nowInstant } from "../domain/primitives";
 import { splitShiftAt, mergeShifts } from "../domain/operations";
 import type { Shift, Expense, Client } from "../domain/entities";
@@ -25,6 +26,11 @@ const ui = {
   editing: null as string | null,
   msg: "",
   confirm: null as { kind: string; id: string; label: string; what: string } | null,
+  /** Who a new expense is for, by client id, and each one's percentage share. */
+  expFor: {} as Record<string, number>,
+  /** Kept across re-renders so ticking a person does not wipe what was typed. */
+  draft: { desc: "", amt: "" },
+  view: { as: "me", clientId: "" } as { as: "me" | "guardian" | "payer"; clientId: string },
   sort: { shifts: { key: "startAt", dir: -1 }, expenses: { key: "occurredAt", dir: -1 }, owed: { key: "unclaimed", dir: -1 } },
 };
 
@@ -88,7 +94,20 @@ async function render() {
 
   app.innerHTML = `
     <header><h1>Respite Support</h1><span class="dev">device ${dev.slice(0, 8)}</span></header>
+    <section class="card">
+      <h2>Viewing as</h2>
+      <div class="row">
+        <select id="viewAs">
+          <option value="me"${ui.view.as === "me" ? " selected" : ""}>Me — everything</option>
+          <option value="guardian"${ui.view.as === "guardian" ? " selected" : ""}>Guardian — one person only</option>
+          <option value="payer"${ui.view.as === "payer" ? " selected" : ""}>Payer — expenses as extra time</option>
+        </select>
+        ${ui.view.as !== "me" ? `<select id="viewWho">${clients.map((c) => `<option value="${c.id}"${ui.view.clientId === c.id ? " selected" : ""}>${c.name}</option>`).join("")}</select>` : ""}
+      </div>
+    </section>
+    ${ui.view.as === "me" ? "" : shareView(ui.view.as, ui.view.clientId || clients[0]?.id || "", allShifts, expenses, clients, name)}
 
+    ${ui.view.as !== "me" ? "" : `
     <div class="grid">
       <div class="stat"><b>${dur(totalMins)}</b><span>logged</span></div>
       <div class="stat"><b>${money(totalOwed)}</b><span>unclaimed</span></div>
@@ -167,11 +186,23 @@ async function render() {
                <input id="ea" type="number" step="0.01" value="${(e.totalAmount / 100).toFixed(2)}" />
                <button class="tiny" data-save-exp="${e.id}">Save</button>
                <button class="tiny ghost" data-cancel="1">Cancel</button></div></td></tr>`
-          : `<tr><td>${e.description}</td><td>${day(e.occurredAt)}</td><td class="n">${money(e.totalAmount)}</td>
+          : `<tr><td>${e.description}<br><span class="sub">${(expenses.find((x) => x.id === e.id)?.splits ?? [])
+                 .map((sp) => `${name(sp.clientId)} ${money(sp.amount)}`).join(" · ") || "nobody"}</span></td>
+             <td>${day(e.occurredAt)}</td><td class="n">${money(e.totalAmount)}</td>
              <td class="n"><button class="tiny ghost" data-edit="${e.id}">Edit</button>
              ${trash("expense", e.id, `${e.description} (${money(e.totalAmount)})`, "expense")}</td></tr>`).join("")}
       </table>` : `<p class="empty">None yet.</p>`}
-      <div class="row"><input id="edesc" placeholder="What for?" /><input id="eamt" type="number" placeholder="0.00" step="0.01" /><button id="adde">Add</button></div>
+      <div class="row"><input id="edesc" placeholder="What for?" value="${ui.draft.desc}" /><input id="eamt" type="number" placeholder="0.00" step="0.01" style="max-width:130px" value="${ui.draft.amt}" /></div>
+      ${clients.length ? `<p class="sub" style="margin:10px 0 4px">Who was it for? Shares must add up to 100%.</p>
+      <table><tbody>${clients.map((c) => {
+        const on = ui.expFor[c.id] !== undefined;
+        return `<tr><td style="width:26px"><input type="checkbox" data-for="${c.id}" ${on ? "checked" : ""} style="width:auto" /></td>
+          <td>${c.name}</td>
+          <td class="n" style="width:110px">${on ? `<input type="number" data-pct="${c.id}" value="${ui.expFor[c.id].toFixed(1)}" step="0.1" style="max-width:90px" />%` : `<span class="sub">not included</span>`}</td>
+          <td class="n" style="width:90px"><span class="sub" id="pv-${c.id}"></span></td></tr>`;
+      }).join("")}</tbody></table>
+      <p class="sub" id="pcttotal"></p>` : ""}
+      <div class="row"><button id="adde">Add expense</button></div>
     </section>
 
     <section class="card">
@@ -190,10 +221,69 @@ async function render() {
       <h2>Backup</h2>
       <div class="row"><button id="exp" class="pink">Download log</button><label class="file">Restore<input id="imp" type="file" accept="application/json" hidden /></label></div>
       <p class="msg">${ui.msg}</p>
-    </section>
+    </section>`}
     ${confirmModal()}`;
 
   wire(open, clients, done, expenses);
+}
+
+/**
+ * What one other party sees. A guardian sees their own person's shares as
+ * money. A payer sees the same shares expressed as extra time at the rate
+ * already agreed for that person - the rate itself is never altered.
+ */
+function shareView(as: "guardian" | "payer", clientId: string, shifts: Shift[], expenses: Expense[], clients: Client[], name: (id: string) => string) {
+  const who = clients.find((c) => c.id === clientId);
+  if (!who) return `<section class="card"><p class="empty">Add someone first.</p></section>`;
+
+  const theirShifts = shifts.filter((s) => s.endAt && s.participants.some((p) => p.clientId === clientId));
+  const rows = theirShifts.map((s) => {
+    const p = s.participants.find((x) => x.clientId === clientId)!;
+    const worked = mins(p.inAt, p.outAt);
+    const share = expenses
+      .filter((e) => e.shiftId === s.id)
+      .flatMap((e) => e.splits.filter((sp) => sp.clientId === clientId))
+      .reduce((t, sp) => t + sp.amount, 0);
+    const extra = expenseAsMinutes(share, p.payRate);
+    return { s, p, worked, share, extra };
+  });
+
+  const loose = expenses.filter((e) => !e.shiftId).flatMap((e) => e.splits.filter((sp) => sp.clientId === clientId));
+  const looseTotal = loose.reduce((t, sp) => t + sp.amount, 0);
+  const rate = who.defaultRate ?? 3000;
+
+  const totalWorked = rows.reduce((t, r) => t + r.worked, 0);
+  const totalExtra = rows.reduce((t, r) => t + r.extra, 0) + expenseAsMinutes(looseTotal, rate);
+  const totalMoney = rows.reduce((t, r) => t + Math.round(r.worked / 60 * r.p.payRate) + r.share, 0) + looseTotal;
+
+  return `<section class="card">
+    <h2>${as === "guardian" ? "Guardian view" : "Payer view"} — ${who.name}</h2>
+    <p class="sub">${as === "guardian"
+      ? "Only this person is shown. Nothing about anyone else on the same shift is visible."
+      : "Expense shares are shown as the extra time they are worth at this person's agreed rate. The rate is unchanged."}</p>
+    ${rows.length ? `<table>
+      <tr><th>When</th><th class="n">Time</th>${as === "payer" ? `<th class="n">Extra for expenses</th><th class="n">Billable</th>` : `<th class="n">Support</th><th class="n">Expenses</th><th class="n">Total</th>`}</tr>
+      ${rows.map((r) => as === "payer"
+        ? `<tr><td>${day(r.s.startAt)}</td><td class="n">${dur(r.worked)}</td>
+             <td class="n">${r.extra ? `+${dur(r.extra)}` : "—"}</td>
+             <td class="n">${dur(r.worked + r.extra)}</td></tr>`
+        : `<tr><td>${day(r.s.startAt)}</td><td class="n">${dur(r.worked)}</td>
+             <td class="n">${money(Math.round(r.worked / 60 * r.p.payRate))}</td>
+             <td class="n">${r.share ? money(r.share) : "—"}</td>
+             <td class="n">${money(Math.round(r.worked / 60 * r.p.payRate) + r.share)}</td></tr>`).join("")}
+    </table>` : `<p class="empty">Nothing recorded for ${who.name} yet.</p>`}
+    ${looseTotal ? `<p class="sub" style="margin-top:8px">${as === "payer"
+        ? `Expenses not tied to a shift: +${dur(expenseAsMinutes(looseTotal, rate))} at ${money(rate)}/hr.`
+        : `Expenses not tied to a shift: ${money(looseTotal)}.`}</p>` : ""}
+    <div class="grid" style="margin-top:12px">
+      ${as === "payer"
+        ? `<div class="stat"><b>${dur(totalWorked)}</b><span>time with ${who.name}</span></div>
+           <div class="stat"><b>+${dur(totalExtra)}</b><span>from expenses</span></div>
+           <div class="stat"><b>${dur(totalWorked + totalExtra)}</b><span>billable at ${money(rate)}/hr</span></div>`
+        : `<div class="stat"><b>${dur(totalWorked)}</b><span>time</span></div>
+           <div class="stat"><b>${money(totalMoney)}</b><span>total owed</span></div>`}
+    </div>
+  </section>`;
 }
 
 function confirmModal() {
@@ -320,6 +410,16 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     ui.msg = "Merged.";
   }));
 
+  if ($("viewAs")) ($("viewAs") as unknown as HTMLSelectElement).onchange = (e: any) => {
+    ui.view.as = e.target.value;
+    if (!ui.view.clientId) ui.view.clientId = clients[0]?.id ?? "";
+    render();
+  };
+  if ($("viewWho")) ($("viewWho") as unknown as HTMLSelectElement).onchange = (e: any) => {
+    ui.view.clientId = e.target.value;
+    render();
+  };
+
   // Picking a different person shows that person's standing rate.
   const syncRate = (selId: string, rateId: string) => {
     const sel = $(selId) as unknown as HTMLSelectElement | null;
@@ -395,15 +495,67 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
 
   if ($("adde")) $("adde")!.onclick = () => go(async () => {
     const cents = Math.round(parseFloat($("eamt")!.value || "0") * 100);
-    if (!cents) return;
-    const clientId = clients[0]?.id ?? "unknown";
+    if (!cents) throw new Error("Enter an amount.");
+    const ids = Object.keys(ui.expFor);
+    if (!ids.length) throw new Error("Choose who the expense was for.");
+    // splitByPercent refuses shares that do not total 100 and accounts for
+    // every leftover cent, so the parts always sum back to the receipt.
+    const parts = splitByPercent(cents, ids.map((id) => ui.expFor[id]));
     await emit("expense", newId(), {
       description: $("edesc")!.value || "Expense", totalAmount: cents, category: "other",
       occurredAt: nowInstant(), recordedAt: nowInstant(), shiftId: open?.id ?? null,
       receiptAttachmentIds: [], reimbursementStatus: "unclaimed",
-      splits: [{ clientId, payerPartyId: `payer-${clientId}`, amount: cents }],
+      splits: ids.map((id, i) => ({ clientId: id, payerPartyId: `payer-${id}`, amount: parts[i] })),
     });
+    ui.expFor = {};
+    ui.draft = { desc: "", amt: "" };
   });
+
+  // Ticking someone in or out re-splits the remaining shares evenly.
+  const evenly = () => {
+    const ids = Object.keys(ui.expFor);
+    if (!ids.length) return;
+    const each = 100 / ids.length;
+    ids.forEach((id) => (ui.expFor[id] = each));
+  };
+
+  all("[data-for]", (el) => (el as HTMLInputElement).onchange = () => {
+    const id = el.dataset.for!;
+    if (ui.expFor[id] === undefined) ui.expFor[id] = 0;
+    else delete ui.expFor[id];
+    evenly();
+    render();
+  });
+
+  all("[data-pct]", (el) => (el as HTMLInputElement).oninput = () => {
+    ui.expFor[el.dataset.pct!] = parseFloat((el as HTMLInputElement).value || "0");
+    preview();
+  });
+
+  // Live preview of what each person's share comes to.
+  function preview() {
+    const cents = Math.round(parseFloat($("eamt")?.value || "0") * 100);
+    const ids = Object.keys(ui.expFor);
+    const total = ids.reduce((t, id) => t + ui.expFor[id], 0);
+    const el = document.getElementById("pcttotal");
+    if (el) {
+      const off = Math.abs(total - 100) > 0.05;
+      el.textContent = ids.length ? `${total.toFixed(1)}% allocated${off ? " — must be 100%" : ""}` : "";
+      el.style.color = off ? "var(--danger)" : "var(--muted)";
+    }
+    ids.forEach((id, i) => {
+      const out = document.getElementById(`pv-${id}`);
+      if (!out) return;
+      try {
+        out.textContent = cents ? money(splitByPercent(cents, ids.map((x) => ui.expFor[x]))[i]) : "";
+      } catch {
+        out.textContent = "";
+      }
+    });
+  }
+  if ($("eamt")) $("eamt")!.oninput = () => { ui.draft.amt = $("eamt")!.value; preview(); };
+  if ($("edesc")) $("edesc")!.oninput = () => { ui.draft.desc = $("edesc")!.value; };
+  preview();
 
   if ($("exp")) $("exp")!.onclick = async () => {
     const a = document.createElement("a");
