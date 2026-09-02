@@ -18,7 +18,7 @@ import { connectDrive, driveRemote } from "../store/googleDrive";
 import { pushShifts } from "../store/googleCalendar";
 import { newId, nowInstant } from "../domain/primitives";
 import { splitShiftAt, mergeShifts } from "../domain/operations";
-import type { Shift, Expense, Client, Trip, Note, Attachment, Adjustment } from "../domain/entities";
+import type { Shift, Expense, Client, Trip, Note, Attachment, Adjustment, Submission } from "../domain/entities";
 
 const db = new RespiteDb();
 const dev = deviceId();
@@ -206,10 +206,14 @@ async function render() {
   const notes = live(store, "note") as unknown as Note[];
   const attachments = live(store, "attachment") as unknown as Attachment[];
   const adjustments = live(store, "adjustment") as unknown as Adjustment[];
+  const payments = live(store, "submission") as unknown as Submission[];
   const trips = allTrips.filter((t) => !t.archived && t.reimbursementStatus !== "paid");
   // Archived records and settled expenses drop out of the working views but
   // stay in every total, and stay restorable.
-  const allShifts = shiftsAll.filter((s) => !s.archived);
+  // Settled shifts leave the working lists just as settled expenses and trips
+  // do. A shift that has been paid for staying on the list forever is how a
+  // worker loses track of what is still outstanding.
+  const allShifts = shiftsAll.filter((s) => !s.archived && s.reimbursementStatus !== "paid");
   const expenses = allExpenses.filter((e) => !e.archived && e.reimbursementStatus !== "paid");
   const open = allShifts.find((s) => !s.endAt);
   const done = allShifts.filter((s) => s.endAt);
@@ -252,7 +256,7 @@ async function render() {
     </section>
     ${ui.view.as === "me" ? ""
       : ui.view.as === "calendar" ? calendarSection(allShifts, allExpenses, allTrips, notes, name)
-      : ui.view.as === "archived" ? archivedView(archived, shiftsAll, allExpenses, owed, name, allTrips)
+      : ui.view.as === "archived" ? archivedView(archived, shiftsAll, allExpenses, owed, name, allTrips, payments)
       : ui.view.clientId === "__all" ? everyoneView(ui.view.as, clients, allShifts, allExpenses, allTrips, adjustments)
       : shareView(ui.view.as, ui.view.clientId || clients[0]?.id || "", allShifts, expenses, everyone, name, trips, notes, store, adjustments)}
 
@@ -453,7 +457,7 @@ async function render() {
     </section>`}
     ${confirmModal()}`;
 
-  wire(open, clients, done, expenses, allShifts, name, allExpenses, allTrips, adjustments, everyone);
+  wire(open, clients, done, expenses, allShifts, name, allExpenses, allTrips, adjustments, everyone, payments);
 }
 
 /**
@@ -467,11 +471,12 @@ async function render() {
  * shifts you have tidied off the list, and expenses that have been paid.
  * Nothing here is deleted, and anything still owed keeps counting in Owed.
  */
-function archivedView(people: Client[], shifts: Shift[], expenses: Expense[], owed: ReturnType<typeof owedByPayer>, name: (id: string) => string, trips: Trip[]) {
-  const archivedShifts = shifts.filter((s) => s.archived);
+function archivedView(people: Client[], shifts: Shift[], expenses: Expense[], owed: ReturnType<typeof owedByPayer>, name: (id: string) => string, trips: Trip[], payments: Submission[]) {
+  const archivedShifts = shifts.filter((s) => s.archived && s.reimbursementStatus !== "paid");
+  const paidShifts = shifts.filter((s) => s.reimbursementStatus === "paid");
   const paidExpenses = expenses.filter((e) => e.archived || e.reimbursementStatus === "paid");
   const archivedTrips = trips.filter((t) => t.archived || t.reimbursementStatus === "paid");
-  const nothing = !people.length && !archivedShifts.length && !paidExpenses.length && !archivedTrips.length;
+  const nothing = !people.length && !archivedShifts.length && !paidExpenses.length && !archivedTrips.length && !paidShifts.length && !payments.length;
 
   return `<section class="card view-archived">
     <h2>Archived people</h2>
@@ -494,22 +499,44 @@ function archivedView(people: Client[], shifts: Shift[], expenses: Expense[], ow
   </section>
 
   <section class="card view-archived">
-    <h2>Expenses paid</h2>
-    <p class="sub">Settled and out of the way. They stay in the Paid column so the record still adds up.</p>
-    ${paidExpenses.length ? `<table><tbody>${paidExpenses.map((e) => `<tr>
-      <td>${e.description}<br><span class="sub">${day(e.occurredAt)} · ${e.splits.map((sp) => `${name(sp.clientId)} ${money(sp.amount)}`).join(" · ")}</span></td>
-      <td class="n">${money(e.totalAmount)}</td>
-      <td class="n"><button class="tiny pink" data-unpaid="${e.id}">Reopen</button></td></tr>`).join("")}</tbody></table>`
-      : `<p class="empty">Nothing paid off yet.</p>`}
+    <h2>Invoices paid</h2>
+    <p class="sub">Every payment received: when it came in, who paid it, who it was for, and what it was made up of.</p>
+    ${payments.length ? `<table>
+      <tr><th>Paid</th><th>From</th><th>For</th><th>What it covered</th><th class="n">Amount</th><th></th></tr>
+      ${[...payments].sort((a, b) => b.paidAt.localeCompare(a.paidAt)).map((p) => `<tr>
+        <td>${day(p.paidAt)}<br><span class="sub">${hhmm(p.paidAt)}</span></td>
+        <td>${p.clientName}<br><span class="sub">payer</span></td>
+        <td>${p.clientName}</td>
+        <td><span class="sub">
+          ${[p.time ? `${money(p.time)} time (${p.covers.shifts.length} shift${p.covers.shifts.length === 1 ? "" : "s"})` : "",
+             p.expenses ? `${money(p.expenses)} expenses (${p.covers.expenses.length})` : "",
+             p.mileage ? `${money(p.mileage)} mileage (${p.covers.trips.length} trip${p.covers.trips.length === 1 ? "" : "s"})` : "",
+             p.adjustments ? `${money(p.adjustments)} adjustments` : ""].filter(Boolean).join("<br>")}
+        </span></td>
+        <td class="n"><b>${money(p.amount)}</b></td>
+        <td class="n"><button class="tiny pink" data-reopen-invoice="${p.id}">Reopen</button></td>
+      </tr>`).join("")}
+    </table>
+    <div class="grid" style="margin-top:12px">
+      <div class="stat"><b>${money(payments.reduce((t, p) => t + p.amount, 0))}</b><span>received in total</span></div>
+      <div class="stat"><b>${payments.length}</b><span>invoice${payments.length === 1 ? "" : "s"} paid</span></div>
+    </div>`
+      : `<p class="empty">Nothing paid yet.</p>`}
   </section>
+
   <section class="card">
-    <h2>Mileage settled</h2>
-    ${archivedTrips.length ? `<table><tbody>${archivedTrips.map((t) => `<tr>
-      <td>${t.purpose || "Trip"}<br><span class="sub">${day(t.occurredAt)} · ${t.distance}${t.distanceUnit}</span></td>
-      <td class="n">${money(t.splits.reduce((a, sp) => a + sp.claimAmount, 0))}</td>
-      <td class="n"><button class="tiny pink" data-untrip="${t.id}">Reopen</button></td></tr>`).join("")}</tbody></table>`
-      : `<p class="empty">No settled trips.</p>`}
+    <h2>Settled items</h2>
+    <p class="sub">The individual records behind those payments, if you need to reopen just one.</p>
+    ${paidShifts.length || paidExpenses.length || archivedTrips.length ? `<table><tbody>
+      ${paidShifts.map((s) => `<tr><td>${day(s.startAt)} ${hhmm(s.startAt)}<br><span class="sub">shift · ${s.participants.map((p) => name(p.clientId)).join(", ")}</span></td>
+        <td class="n"><button class="tiny ghost" data-unpaid-shift="${s.id}">Reopen</button></td></tr>`).join("")}
+      ${paidExpenses.map((e) => `<tr><td>${e.description}<br><span class="sub">expense · ${day(e.occurredAt)} · ${money(e.totalAmount)}</span></td>
+        <td class="n"><button class="tiny ghost" data-unpaid="${e.id}">Reopen</button></td></tr>`).join("")}
+      ${archivedTrips.map((t) => `<tr><td>${t.purpose || "Trip"}<br><span class="sub">mileage · ${day(t.occurredAt)} · ${t.distance}${t.distanceUnit}</span></td>
+        <td class="n"><button class="tiny ghost" data-untrip="${t.id}">Reopen</button></td></tr>`).join("")}
+    </tbody></table>` : `<p class="empty">Nothing settled yet.</p>`}
   </section>
+
   ${nothing ? `<section class="card"><p class="sub">Nothing has been archived. Archiving puts things away without deleting them — you can bring anything back from here.</p></section>` : ""}`;
 }
 
@@ -786,7 +813,7 @@ function shiftDetail(s: Shift, expenses: Expense[], done: Shift[], name: (id: st
   </div>`;
 }
 
-function wire(open: Shift | undefined, clients: Client[], done: Shift[], expenses: Expense[], allShifts: Shift[], name: (id: string) => string, allExpenses: Expense[], allTrips: Trip[], adjustments: Adjustment[], everyoneList: Client[]) {
+function wire(open: Shift | undefined, clients: Client[], done: Shift[], expenses: Expense[], allShifts: Shift[], name: (id: string) => string, allExpenses: Expense[], allTrips: Trip[], adjustments: Adjustment[], everyoneList: Client[], payments: Submission[]) {
   const $ = (id: string) => document.getElementById(id) as HTMLInputElement | null;
   const go = async (fn: () => Promise<void>) => { try { await fn(); } catch (err: any) { ui.msg = err.message; } render(); };
   const all = (sel: string, fn: (el: HTMLElement) => void) => document.querySelectorAll<HTMLElement>(sel).forEach(fn);
@@ -898,6 +925,17 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     go(() => emit("expense", el.dataset.paid!, { reimbursementStatus: "paid" }));
   });
   all("[data-unarch-shift]", (el) => el.onclick = () => go(() => emit("shift", el.dataset.unarchShift!, { archived: false })));
+  all("[data-reopen-invoice]", (el) => el.onclick = () => go(async () => {
+    const p = payments.find((x) => x.id === el.dataset.reopenInvoice);
+    if (!p) return;
+    for (const id of p.covers.shifts) await emit("shift", id, { reimbursementStatus: "unclaimed" });
+    for (const id of p.covers.expenses) await emit("expense", id, { reimbursementStatus: "unclaimed", archived: false });
+    for (const id of p.covers.trips) await emit("trip", id, { reimbursementStatus: "unclaimed", archived: false });
+    await emit("submission", p.id, { deleted: true });
+    ui.msg = `Reopened ${p.clientName}'s invoice. Everything it covered is owed again.`;
+  }));
+
+  all("[data-unpaid-shift]", (el) => el.onclick = () => go(() => emit("shift", el.dataset.unpaidShift!, { reimbursementStatus: "unclaimed", archived: false })));
   all("[data-untrip]", (el) => el.onclick = () => go(() => emit("trip", el.dataset.untrip!, { reimbursementStatus: "unclaimed", archived: false })));
   all("[data-unpaid]", (el) => el.onclick = () => go(() => emit("expense", el.dataset.unpaid!, { reimbursementStatus: "unclaimed", archived: false })));
 
@@ -974,11 +1012,30 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
 
   if ($("doPaid")) $("doPaid")!.onclick = () => go(async () => {
     const payer = ui.confirm!.id;
+    const clientId = payer.replace(/^payer-/, "");
     ui.confirm = null;
+
+    // Snapshot what is being settled BEFORE restamping, or the record would be
+    // written against records that already read as paid and cover nothing.
+    const inv = invoiceFor(clientId);
+    const open = (st: string) => st === "unclaimed" || st === "submitted";
+    await emit("submission", newId(), {
+      payerPartyId: payer, clientId, clientName: inv.clientName,
+      paidAt: nowInstant(), amount: inv.total,
+      time: inv.time, expenses: inv.expenses, mileage: inv.mileage, adjustments: inv.adjustments,
+      covers: {
+        shifts: allShifts.filter((x) => open(x.reimbursementStatus) && x.participants.some((p) => p.payerPartyId === payer)).map((x) => x.id),
+        expenses: allExpenses.filter((x) => open(x.reimbursementStatus) && x.splits.some((sp) => sp.payerPartyId === payer)).map((x) => x.id),
+        trips: allTrips.filter((x) => open(x.reimbursementStatus) && x.splits.some((sp) => sp.payerPartyId === payer)).map((x) => x.id),
+      },
+      occurredAt: nowInstant(), recordedAt: nowInstant(),
+      zone: Intl.DateTimeFormat().resolvedOptions().timeZone, tags: [], customFields: {},
+    });
+
     for (const from of ["unclaimed", "submitted"] as const) {
       await restamp(payer, from as any, "paid");
     }
-    ui.msg = "Marked paid. It is in the Archived view if you need it back.";
+    ui.msg = `Recorded as paid. It is under Invoices paid in the Archived view.`;
   });
 
   if ($("doDelete")) $("doDelete")!.onclick = () => go(async () => {

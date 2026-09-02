@@ -185,6 +185,30 @@ export interface Adjustment extends BaseRecord {
   note: string;
 }
 
+/**
+ * A payment received: one invoice, settled.
+ *
+ * Written when a claim is marked paid, and it keeps the answers a worker needs
+ * months later - when, from which payer, for which person, how much, and what
+ * the money was for. The individual shifts and receipts carry a "paid" status,
+ * but a status cannot say when it was paid or which invoice it belonged to, and
+ * that is exactly what gets asked about.
+ */
+export interface Submission extends BaseRecord {
+  payerPartyId: Id;
+  clientId: Id;
+  clientName: string;
+  paidAt: ISOInstant;
+  amount: Money;
+  time: Money;
+  expenses: Money;
+  mileage: Money;
+  adjustments: Money;
+  /** What it settled, so it can all be reopened together if a payment bounces. */
+  covers: { shifts: Id[]; expenses: Id[]; trips: Id[] };
+  note?: string;
+}
+
 export interface Tag extends BaseRecord {
   label: string;
   colour: string;
