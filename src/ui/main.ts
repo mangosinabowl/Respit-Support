@@ -45,6 +45,16 @@ function sorted<T>(rows: T[], s: { key: string; dir: number }): T[] {
     return (typeof x === "number" ? x - y : String(x).localeCompare(String(y))) * s.dir;
   });
 }
+const RULE_LABEL: Record<string, string> = {
+  fullPerPayer: "pays the full hour",
+  splitEvenly: "splits the hour",
+};
+const ruleSelect = (id: string, value: string) =>
+  `<select id="${id}" style="max-width:200px"${id.startsWith("rule-") ? ` data-rule="${id}"` : ""}>
+     <option value="fullPerPayer"${value === "fullPerPayer" ? " selected" : ""}>Pays the full hour</option>
+     <option value="splitEvenly"${value === "splitEvenly" ? " selected" : ""}>Splits the hour</option>
+   </select>`;
+
 const TRASH = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>`;
 
 /** A trash button that asks before it acts. */
@@ -92,19 +102,15 @@ async function render() {
         ? `<p class="big">since ${hhmm(open.startAt)} \u00B7 ${dur(mins(open.startAt, nowInstant()))}</p>
            <table><tbody>${open.participants.map((p, i) => {
              const gone = Date.parse(p.outAt) > Date.parse(p.inAt);
-             return `<tr><td>${name(p.clientId)}<br><span class="sub">${hhmm(p.inAt)}${gone ? `\u2013${hhmm(p.outAt)}` : " \u2192 still here"} @ ${money(p.payRate)}/hr</span></td>
-               <td class="n">${gone ? `<span class="pill">left</span>` : `<button class="tiny ghost" data-left="${i}">Mark left</button>`}</td></tr>`;
+             return `<tr><td>${name(p.clientId)}<br><span class="sub">${hhmm(p.inAt)}${gone ? `\u2013${hhmm(p.outAt)}` : " \u2192 still here"} @ ${money(p.payRate)}/hr \u00B7 ${RULE_LABEL[p.timeRule] ?? p.timeRule}</span></td>
+               <td class="n">${ruleSelect(`rule-${i}`, p.timeRule)} ${gone ? `<span class="pill">left</span>` : `<button class="tiny ghost" data-left="${i}">Mark left</button>`}</td></tr>`;
            }).join("")}</tbody></table>
            ${clients.filter((c) => !open.participants.some((p) => p.clientId === c.id)).length
              ? `<div class="row"><select id="arrive">${clients.filter((c) => !open.participants.some((p) => p.clientId === c.id)).map((c) => `<option value="${c.id}">${c.name}</option>`).join("")}</select>
                 <input id="arate" type="number" value="${((clients.filter((c) => !open.participants.some((p) => p.clientId === c.id))[0].defaultRate ?? 3000) / 100).toFixed(2)}" step="0.5" style="max-width:110px" />
                 <button class="pink" id="addp">Someone arrived</button></div>`
              : ""}
-           <label>When two people overlap</label>
-           <select id="rule">
-             <option value="fullPerPayer">Each payer pays the full hour</option>
-             <option value="splitEvenly">Split the hour between them</option>
-           </select>
+           <p class="sub">Each person settles their own way. An hour is shared only among those set to split it.</p>
            <div class="acts"><button id="end" class="primary">End shift</button>
            ${trash("shift", open.id, `the shift running since ${hhmm(open.startAt)}`, "shift")}</div>`
         : clients.length
@@ -121,11 +127,12 @@ async function render() {
       <table><tbody>
         ${clients.map((c) => ui.editing === c.id
           ? `<tr><td colspan="2"><div class="row"><input id="ren" value="${c.name}" />
-               <input id="rrate" type="number" step="0.5" style="max-width:120px" value="${((c.defaultRate ?? 3000) / 100).toFixed(2)}" title="Hourly rate" />
+               <input id="rrate" type="number" step="0.5" style="max-width:110px" value="${((c.defaultRate ?? 3000) / 100).toFixed(2)}" title="Hourly rate" />
+               ${ruleSelect("rrule", c.defaultTimeRule ?? "fullPerPayer")}
                <button class="tiny" data-save-client="${c.id}">Save</button>
                <button class="tiny ghost" data-cancel="1">Cancel</button></div>
                <p class="sub" style="margin:6px 0 0">Changing the rate only affects shifts you log from now on. Shifts already recorded keep the rate they were logged at.</p></td></tr>`
-          : `<tr><td>${c.name}<br><span class="sub">${money(c.defaultRate ?? 3000)}/hr</span></td><td class="n">
+          : `<tr><td>${c.name}<br><span class="sub">${money(c.defaultRate ?? 3000)}/hr · ${RULE_LABEL[c.defaultTimeRule ?? "fullPerPayer"]}</span></td><td class="n">
                <button class="tiny ghost" data-edit="${c.id}">Edit</button>
                ${trash("client", c.id, c.name, "person")}</td></tr>`).join("")
           || `<tr><td class="empty">Nobody yet</td></tr>`}
@@ -275,7 +282,8 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     const v = $("ren")!.value.trim();
     if (!v) return;
     const rate = Math.round(parseFloat($("rrate")!.value || "0") * 100);
-    await emit("client", el.dataset.saveClient!, { name: v, defaultRate: rate });
+    const rule = ($("rrule") as unknown as HTMLSelectElement).value;
+    await emit("client", el.dataset.saveClient!, { name: v, defaultRate: rate, defaultTimeRule: rule });
     ui.editing = null;
   }));
 
@@ -338,22 +346,31 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     await emit("shift", newId(), {
       startAt: now, endAt: null, occurredAt: now, recordedAt: now,
       zone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      participants: [{ clientId, payerPartyId: `payer-${clientId}`, inAt: now, outAt: now, payRate, timeRule: "fullPerPayer" }],
+      participants: [{ clientId, payerPartyId: `payer-${clientId}`, inAt: now, outAt: now, payRate,
+        timeRule: clients.find((c) => c.id === clientId)?.defaultTimeRule ?? "fullPerPayer" }],
       isIncident: false, reimbursementStatus: "unclaimed", tags: [], customFields: {},
     });
   });
 
   if ($("end")) $("end")!.onclick = () => go(async () => {
     const now = nowInstant();
-    const rule = ($("rule") as unknown as HTMLSelectElement | null)?.value ?? "fullPerPayer";
-    // Anyone already marked as having left keeps the time they left at; only
-    // those still present are closed out now.
+    // Anyone already marked as left keeps the time they actually left at; only
+    // those still present are closed out now. Each person's own billing rule is
+    // left untouched - one global rule would silently rewrite the others.
     await emit("shift", open!.id, {
       endAt: now,
       participants: open!.participants.map((p) =>
-        Date.parse(p.outAt) > Date.parse(p.inAt) ? { ...p, timeRule: rule } : { ...p, outAt: now, timeRule: rule }),
+        Date.parse(p.outAt) > Date.parse(p.inAt) ? p : { ...p, outAt: now }),
     });
   });
+
+  all("[data-rule]", (el) => (el as HTMLSelectElement).onchange = () => go(async () => {
+    const i = Number(el.dataset.rule!.split("-")[1]);
+    const value = (el as HTMLSelectElement).value as "fullPerPayer" | "splitEvenly";
+    await emit("shift", open!.id, {
+      participants: open!.participants.map((p, j) => (j === i ? { ...p, timeRule: value } : p)),
+    });
+  }));
 
   all("[data-left]", (el) => el.onclick = () => go(async () => {
     const i = Number(el.dataset.left);
@@ -370,7 +387,8 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     // One shift, several people, different arrival times - exactly what the
     // allocation engine is built to bill correctly.
     await emit("shift", open!.id, {
-      participants: [...open!.participants, { clientId, payerPartyId: `payer-${clientId}`, inAt: now, outAt: now, payRate, timeRule: "fullPerPayer" }],
+      participants: [...open!.participants, { clientId, payerPartyId: `payer-${clientId}`, inAt: now, outAt: now, payRate,
+        timeRule: clients.find((c) => c.id === clientId)?.defaultTimeRule ?? "fullPerPayer" }],
     });
     ui.msg = `${clients.find((c) => c.id === clientId)?.name ?? "They"} added to this shift.`;
   });

@@ -39,6 +39,12 @@ export interface Client extends BaseRecord {
    * time is snapshotted onto the participant (spec 6.3).
    */
   defaultRate?: Money;
+  /**
+   * How this person's payer settles time when others are present. Per person,
+   * not per shift: one family may split a shared hour while an agency pays the
+   * full hour regardless of who else was there.
+   */
+  defaultTimeRule?: TimeRule;
   displayInitial: string;
   colour: string;
   dateOfBirth?: string;
