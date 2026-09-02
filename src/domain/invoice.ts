@@ -5,6 +5,10 @@ import { minutesBetween } from "./primitives";
 
 export interface InvoiceLine {
   kind: "time" | "expense" | "mileage" | "adjustment";
+  /** The record this line came from, so a caller can let the user deselect it. */
+  sourceId: string;
+  /** Where it stands: already sent to the payer, or not yet claimed. */
+  status?: string;
   when: string;
   detail: string;
   /** Hours and rate for a time line, so a payer can check the arithmetic. */
@@ -58,6 +62,8 @@ export function buildInvoice(
       const mins = minutesBetween(p.inAt, p.outAt);
       lines.push({
         kind: "time",
+        sourceId: s.id,
+        status: s.reimbursementStatus,
         when: s.startAt,
         detail: `Support for ${clientName}`,
         quantity: `${(claim.minutes / 60).toFixed(2)} h at ${(p.payRate / 100).toFixed(2)}/h${claim.minutes !== mins ? " (shared)" : ""}`,
@@ -72,7 +78,7 @@ export function buildInvoice(
     if (!statuses.includes(e.reimbursementStatus)) continue;
     for (const sp of e.splits) {
       if (sp.payerPartyId !== payerPartyId) continue;
-      lines.push({ kind: "expense", when: e.occurredAt, detail: e.description || "Expense", amount: sp.amount });
+      lines.push({ kind: "expense", sourceId: e.id, status: e.reimbursementStatus, when: e.occurredAt, detail: e.description || "Expense", amount: sp.amount });
       expenseTotal += sp.amount;
     }
   }
@@ -84,6 +90,8 @@ export function buildInvoice(
       if (sp.payerPartyId !== payerPartyId) continue;
       lines.push({
         kind: "mileage",
+        sourceId: t.id,
+        status: t.reimbursementStatus,
         when: t.occurredAt,
         detail: t.purpose || "Trip",
         quantity: `${sp.distanceShare.toFixed(1)} ${t.distanceUnit} at ${(sp.rateApplied / 100).toFixed(2)}/${t.distanceUnit}`,
@@ -96,6 +104,7 @@ export function buildInvoice(
   const mine = adjustments.filter((a) => a.payerPartyId === payerPartyId);
   const adjustmentLines: InvoiceLine[] = mine.map((a) => ({
     kind: "adjustment",
+    sourceId: a.id,
     when: a.occurredAt,
     detail: a.note || "Adjustment",
     amount: a.amountDelta,

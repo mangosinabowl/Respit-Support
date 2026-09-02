@@ -56,6 +56,12 @@ const ui = {
   view: { as: "me", clientId: "" } as { as: "me" | "guardian" | "payer" | "archived" | "calendar"; clientId: string },
   cal: { anchor: todayKey(), grain: "week" as Grain },
   calMsg: "",
+  /**
+   * What goes on the next invoice. A date range narrows it, and anything ticked
+   * off is left out. Held here rather than on the records, because choosing not
+   * to invoice something this time is not a change to what happened.
+   */
+  pick: { from: "", to: "", left_out: {} as Record<string, true> },
   sort: { shifts: { key: "startAt", dir: -1 }, expenses: { key: "occurredAt", dir: -1 }, owed: { key: "unclaimed", dir: -1 } },
 };
 
@@ -586,7 +592,8 @@ function everyoneView(as: "guardian" | "payer", clients: Client[], shifts: Shift
       <table>
         <tr><th>When</th><th>What</th><th class="n">Amount</th></tr>
         ${inv.lines.map((l) => `<tr><td>${day(l.when)}</td>
-          <td>${l.detail}${l.quantity ? `<br><span class="sub">${l.quantity}</span>` : ""}</td>
+          <td>${l.detail}${l.quantity ? `<br><span class="sub">${l.quantity}</span>` : ""}${
+        l.status === "submitted" ? `<span class="pill warn" title="Already sent to the payer and not yet paid">sent, unpaid</span>` : ""}</td>
           <td class="n">${money(l.amount)}</td></tr>`).join("")}
         <tr><td></td><td class="sub">Time</td><td class="n sub">${money(inv.time)}</td></tr>
         <tr><td></td><td class="sub">Expenses</td><td class="n sub">${money(inv.expenses)}</td></tr>
@@ -655,8 +662,15 @@ function shareView(as: "guardian" | "payer", clientId: string, shifts: Shift[], 
   // silently drop all the time from the invoice. buildInvoice is already
   // scoped to this payer, so it cannot reach another family's money anyway -
   // the filtered set above is what governs what is DISPLAYED as theirs.
-  const billable = shifts.filter((s) => s.endAt && s.participants.some((p) => p.payerPartyId === `payer-${clientId}`));
-  const invoice = buildInvoice(`payer-${clientId}`, clientId, who.name, billable, expenses, trips, adjustments);
+  const chosen = <T extends { id: string; occurredAt: string }>(rows: T[]) => rows.filter((r) => {
+    if (ui.pick.left_out[r.id]) return false;
+    const d = dayKey(r.occurredAt);
+    if (ui.pick.from && d < ui.pick.from) return false;
+    if (ui.pick.to && d > ui.pick.to) return false;
+    return true;
+  });
+  const billable = chosen(shifts.filter((s) => s.endAt && s.participants.some((p) => p.payerPartyId === `payer-${clientId}`)));
+  const invoice = buildInvoice(`payer-${clientId}`, clientId, who.name, billable, chosen(expenses), chosen(trips), chosen(adjustments));
   const totalWorked = rows.reduce((t, r) => t + r.worked, 0);
   const outlay = invoice.expenses + invoice.mileage;
   const outlayAsTime = expenseAsMinutes(outlay, rate);
@@ -667,10 +681,19 @@ function shareView(as: "guardian" | "payer", clientId: string, shifts: Shift[], 
   })();
 
   const lineRows = invoice.lines.map((l) => `<tr>
+      ${as === "payer" ? `<td style="width:26px"><input type="checkbox" data-pick="${l.sourceId}" checked style="width:auto" title="Leave this off the invoice" /></td>` : ""}
       <td>${day(l.when)}</td>
-      <td>${l.detail}${l.quantity ? `<br><span class="sub">${l.quantity}</span>` : ""}</td>
+      <td>${l.detail}${l.quantity ? `<br><span class="sub">${l.quantity}</span>` : ""}${
+        l.status === "submitted" ? `<span class="pill warn" title="Already sent to the payer and not yet paid">sent, unpaid</span>` : ""}</td>
       <td class="n">${money(l.amount)}</td>
     </tr>`).join("");
+
+  // Anything excluded, listed so it is obvious what is being left off rather
+  // than silently missing from the total.
+  const omitted = [
+    ...shifts.filter((x) => x.endAt && x.participants.some((p) => p.payerPartyId === `payer-${clientId}`)),
+    ...expenses, ...trips,
+  ].filter((r) => ui.pick.left_out[r.id]);
 
   return `<section class="card">
     <h2>${as === "guardian" ? "Guardian view" : "Payer view"} — ${who.name}</h2>
@@ -678,15 +701,26 @@ function shareView(as: "guardian" | "payer", clientId: string, shifts: Shift[], 
       ? "Only this person is shown. Every line says what it is made of, so the cost can be checked rather than taken on trust."
       : "The same claim two ways: what it costs, or the time it is worth at this person's agreed rate. The rate is unchanged."}</p>
 
+    ${as === "payer" ? `<div class="row">
+      <label style="flex:0 0 auto">From</label><input id="pickFrom" type="date" value="${ui.pick.from}" style="max-width:170px" />
+      <label style="flex:0 0 auto">To</label><input id="pickTo" type="date" value="${ui.pick.to}" style="max-width:170px" />
+      <button class="tiny ghost" id="pickAll">Everything outstanding</button>
+    </div>
+    <p class="sub">Leave the dates empty for everything outstanding. Untick any line to keep it off this invoice — it stays owed and appears on the next one.</p>` : ""}
+
     ${invoice.lines.length ? `<table>
-      <tr><th>When</th><th>What</th><th class="n">Amount</th></tr>
+      <tr>${as === "payer" ? "<th></th>" : ""}<th>When</th><th>What</th><th class="n">Amount</th></tr>
       ${lineRows}
-      <tr><td></td><td><b>Time</b></td><td class="n"><b>${money(invoice.time)}</b></td></tr>
-      <tr><td></td><td><b>Expenses</b></td><td class="n"><b>${money(invoice.expenses)}</b></td></tr>
-      <tr><td></td><td><b>Mileage</b></td><td class="n"><b>${money(invoice.mileage)}</b></td></tr>
-      ${invoice.adjustments ? `<tr><td></td><td><b>Adjustments</b></td><td class="n"><b>${money(invoice.adjustments)}</b></td></tr>` : ""}
-      <tr><td></td><td><b>Total</b></td><td class="n"><b>${money(invoice.total)}</b></td></tr>
-    </table>` : `<p class="empty">Nothing recorded for ${who.name} yet.</p>`}
+      ${(() => { const pad = as === "payer" ? "<td></td>" : ""; return `
+      <tr>${pad}<td></td><td><b>Time</b></td><td class="n"><b>${money(invoice.time)}</b></td></tr>
+      <tr>${pad}<td></td><td><b>Expenses</b></td><td class="n"><b>${money(invoice.expenses)}</b></td></tr>
+      <tr>${pad}<td></td><td><b>Mileage</b></td><td class="n"><b>${money(invoice.mileage)}</b></td></tr>
+      ${invoice.adjustments ? `<tr>${pad}<td></td><td><b>Adjustments</b></td><td class="n"><b>${money(invoice.adjustments)}</b></td></tr>` : ""}
+      <tr>${pad}<td></td><td><b>Total</b></td><td class="n"><b>${money(invoice.total)}</b></td></tr>`; })()}
+    </table>
+    ${omitted.length ? `<p class="sub">Left off this invoice, still owed: ${omitted.length} item${omitted.length === 1 ? "" : "s"}.
+      <button class="tiny ghost" id="pickAll2">Put them back</button></p>` : ""}`
+      : `<p class="empty">${ui.pick.from || ui.pick.to || omitted.length ? "Nothing in that selection." : `Nothing recorded for ${who.name} yet.`}</p>`}
 
     ${sharedNotes.length ? `<h3 style="margin-top:14px">Notes</h3>
       <table><tbody>${sharedNotes.map((n) => `<tr><td>${n.body}<br><span class="sub">${day(n.occurredAt)}</span></td></tr>`).join("")}</tbody></table>` : ""}
@@ -711,8 +745,14 @@ function shareView(as: "guardian" | "payer", clientId: string, shifts: Shift[], 
     </div>
 
     ${invoice.total ? `<div class="acts" style="margin-top:14px">
-      <button class="tiny pink" data-mark-paid="payer-${clientId}">Mark all as paid</button>
-    </div>` : ""}` : ""}
+      ${invoice.lines.some((l) => l.status === "unclaimed")
+        ? `<button class="tiny" data-submit="payer-${clientId}">Mark this invoice sent</button>` : ""}
+      <button class="tiny pink" data-mark-paid="payer-${clientId}">Mark this invoice paid</button>
+      ${invoice.lines.some((l) => l.status === "submitted")
+        ? `<button class="tiny ghost" data-unsend="payer-${clientId}">Bring the unpaid ones back</button>` : ""}
+    </div>
+    ${invoice.lines.some((l) => l.status === "submitted")
+      ? `<p class="sub">Lines marked <b>sent, unpaid</b> went out on an earlier invoice and were never paid. They stay claimable and appear here until they are, so they can go on this invoice too — or bring them back to unclaimed to start again.</p>` : ""}` : ""}` : ""}
 
     <div class="grid" style="margin-top:12px">
       ${as === "payer"
@@ -1023,10 +1063,12 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
       payerPartyId: payer, clientId, clientName: inv.clientName,
       paidAt: nowInstant(), amount: inv.total,
       time: inv.time, expenses: inv.expenses, mileage: inv.mileage, adjustments: inv.adjustments,
+      // Only what was actually on the invoice: anything left off is still owed
+      // and must not be marked paid alongside it.
       covers: {
-        shifts: allShifts.filter((x) => open(x.reimbursementStatus) && x.participants.some((p) => p.payerPartyId === payer)).map((x) => x.id),
-        expenses: allExpenses.filter((x) => open(x.reimbursementStatus) && x.splits.some((sp) => sp.payerPartyId === payer)).map((x) => x.id),
-        trips: allTrips.filter((x) => open(x.reimbursementStatus) && x.splits.some((sp) => sp.payerPartyId === payer)).map((x) => x.id),
+        shifts: onInvoice(allShifts).filter((x) => open(x.reimbursementStatus) && x.participants.some((p) => p.payerPartyId === payer)).map((x) => x.id),
+        expenses: onInvoice(allExpenses).filter((x) => open(x.reimbursementStatus) && x.splits.some((sp) => sp.payerPartyId === payer)).map((x) => x.id),
+        trips: onInvoice(allTrips).filter((x) => open(x.reimbursementStatus) && x.splits.some((sp) => sp.payerPartyId === payer)).map((x) => x.id),
       },
       occurredAt: nowInstant(), recordedAt: nowInstant(),
       zone: Intl.DateTimeFormat().resolvedOptions().timeZone, tags: [], customFields: {},
@@ -1337,6 +1379,14 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
   });
 
   /** Moves every record for one payer from one status to the next, under one claim id. */
+  const onInvoice = <T extends { id: string; occurredAt: string }>(rows: T[]) => rows.filter((r) => {
+    if (ui.pick.left_out[r.id]) return false;
+    const d = dayKey(r.occurredAt);
+    if (ui.pick.from && d < ui.pick.from) return false;
+    if (ui.pick.to && d > ui.pick.to) return false;
+    return true;
+  });
+
   const restamp = async (payerPartyId: string, from: "unclaimed" | "submitted", to: "submitted" | "paid") => {
     const submissionId = newId();
     const touch = async (type: "shift" | "expense" | "trip", records: { id: string; reimbursementStatus: string }[], belongs: (r: any) => boolean) => {
@@ -1345,9 +1395,9 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
         await emit(type, r.id, to === "submitted" ? { reimbursementStatus: to, submissionId } : { reimbursementStatus: to });
       }
     };
-    await touch("shift", allShifts as any, (s: Shift) => s.participants.some((p) => p.payerPartyId === payerPartyId));
-    await touch("expense", allExpenses as any, (e: Expense) => e.splits.some((sp) => sp.payerPartyId === payerPartyId));
-    await touch("trip", allTrips as any, (t: Trip) => t.splits.some((sp) => sp.payerPartyId === payerPartyId));
+    await touch("shift", onInvoice(allShifts) as any, (s: Shift) => s.participants.some((p) => p.payerPartyId === payerPartyId));
+    await touch("expense", onInvoice(allExpenses) as any, (e: Expense) => e.splits.some((sp) => sp.payerPartyId === payerPartyId));
+    await touch("trip", onInvoice(allTrips) as any, (t: Trip) => t.splits.some((sp) => sp.payerPartyId === payerPartyId));
   };
 
   all("[data-submit]", (el) => el.onclick = () => go(async () => {
@@ -1370,9 +1420,33 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     ui.msg = "Marked paid.";
   }));
 
+  all("[data-pick]", (el) => (el as HTMLInputElement).onchange = () => {
+    const id = el.dataset.pick!;
+    if ((el as HTMLInputElement).checked) delete ui.pick.left_out[id];
+    else ui.pick.left_out[id] = true;
+    render();
+  });
+  for (const id of ["pickAll", "pickAll2"]) {
+    if ($(id)) $(id)!.onclick = () => { ui.pick = { from: "", to: "", left_out: {} }; render(); };
+  }
+  if ($("pickFrom")) $("pickFrom")!.onchange = () => { ui.pick.from = $("pickFrom")!.value; render(); };
+  if ($("pickTo")) $("pickTo")!.onchange = () => { ui.pick.to = $("pickTo")!.value; render(); };
+
+  /**
+   * The invoice as it is on screen: same date range, same lines ticked off.
+   * Printing or settling something different from what was shown is how a payer
+   * ends up with an invoice the worker never saw.
+   */
   const invoiceFor = (cid: string) => {
     const c = everyoneList.find((x) => x.id === cid);
-    return buildInvoice(`payer-${cid}`, cid, c?.name ?? "Unknown", allShifts, allExpenses, allTrips, adjustments);
+    const keep = <T extends { id: string; occurredAt: string }>(rows: T[]) => rows.filter((r) => {
+      if (ui.pick.left_out[r.id]) return false;
+      const d = dayKey(r.occurredAt);
+      if (ui.pick.from && d < ui.pick.from) return false;
+      if (ui.pick.to && d > ui.pick.to) return false;
+      return true;
+    });
+    return buildInvoice(`payer-${cid}`, cid, c?.name ?? "Unknown", keep(allShifts), keep(allExpenses), keep(allTrips), keep(adjustments));
   };
 
   if ($("calGrain")) ($("calGrain") as unknown as HTMLSelectElement).onchange = (e: any) => {
@@ -1428,6 +1502,23 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
       zone: Intl.DateTimeFormat().resolvedOptions().timeZone, tags: [], customFields: {},
     });
     ui.msg = "Adjustment added. The original records are unchanged.";
+  }));
+
+  all("[data-unsend]", (el) => el.onclick = () => go(async () => {
+    // Sent but never paid: put it back to unclaimed so it can be invoiced
+    // afresh, without pretending it was never claimed in the first place.
+    const payer = el.dataset.unsend!;
+    let n = 0;
+    for (const s of onInvoice(allShifts)) {
+      if (s.reimbursementStatus === "submitted" && s.participants.some((p) => p.payerPartyId === payer)) { await emit("shift", s.id, { reimbursementStatus: "unclaimed" }); n += 1; }
+    }
+    for (const x of onInvoice(allExpenses)) {
+      if (x.reimbursementStatus === "submitted" && x.splits.some((sp) => sp.payerPartyId === payer)) { await emit("expense", x.id, { reimbursementStatus: "unclaimed" }); n += 1; }
+    }
+    for (const t of onInvoice(allTrips)) {
+      if (t.reimbursementStatus === "submitted" && t.splits.some((sp) => sp.payerPartyId === payer)) { await emit("trip", t.id, { reimbursementStatus: "unclaimed" }); n += 1; }
+    }
+    ui.msg = `${n} item${n === 1 ? "" : "s"} brought back to unclaimed. They can go on a new invoice.`;
   }));
 
   all("[data-mark-paid]", (el) => el.onclick = (e) => {
