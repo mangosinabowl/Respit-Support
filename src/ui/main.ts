@@ -630,6 +630,11 @@ function archivedView(people: Client[], shifts: Shift[], expenses: Expense[], ow
  */
 function calculatorSection() {
   const c = ui.calc;
+  /** Full precision, so the exact column is not quietly rounded to money. */
+  const exact = (n: number) => {
+    const t = Number(n.toPrecision(12));
+    return Number.isInteger(t) ? `$${t}.00` : `$${String(t)}`;
+  };
   const keys = [["C", "±", "%", "/"], ["7", "8", "9", "*"], ["4", "5", "6", "-"], ["1", "2", "3", "+"], ["0", ".", "⌫", "="]];
   const sp = splitPreview(c.total, c.shares);
 
@@ -655,15 +660,20 @@ function calculatorSection() {
         ${c.shares.length > 2 ? `<button class="tiny ghost" data-calc-remove="1">Remove one</button>` : ""}
       </div>
       <table style="margin-top:10px">
-        <tr><th>Share</th><th class="n">Comes to</th></tr>
+        <tr><th>Share</th><th class="n">Exact</th><th class="n">The app would charge</th></tr>
         ${sp.rows.map((r, i) => `<tr>
           <td><input type="number" step="0.1" data-calc-share="${i}" value="${r.percent}" style="max-width:110px" />%</td>
-          <td class="n">${sp.ok ? money(r.amount) : "—"}</td>
+          <td class="n">${sp.ok ? exact(r.amount) : "—"}</td>
+          <td class="n"><b>${sp.ok ? money(r.charged) : "—"}</b></td>
         </tr>`).join("")}
         <tr><td><b>${sp.sum.toFixed(2)}% allocated</b></td>
-          <td class="n"><b>${sp.ok ? money(sp.rows.reduce((t, r) => t + r.amount, 0)) : ""}</b></td></tr>
+          <td class="n"><b>${sp.ok ? exact(sp.exactTotal) : ""}</b></td>
+          <td class="n"><b>${sp.ok ? money(sp.chargedTotal) : ""}</b></td></tr>
       </table>
-      ${sp.ok ? `<p class="sub">Every cent accounted for — the parts add back to the total exactly.</p>`
+      ${sp.ok ? `<p class="sub"><b>Exact</b> is the arithmetic: the shares add back to the amount precisely.
+        <b>The app would charge</b> applies the billing rule — each share rounded up to the cent, which is why it can come to
+        ${sp.chargedTotal > Math.round(sp.totalValue * 100) ? `${money(sp.chargedTotal - Math.round(sp.totalValue * 100))} more` : "the same"}.
+        Copy whichever you need.</p>`
         : `<p class="flag">Shares have to add up to 100% before this can be split.</p>`}
       <p class="sub">A scratch pad. Nothing here is saved, and the app does not read it.</p>`}
   </section>`;
