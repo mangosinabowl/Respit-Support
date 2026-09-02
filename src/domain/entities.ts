@@ -149,6 +149,20 @@ export interface Note extends BaseRecord {
   visibility: NoteVisibility;
 }
 
+/**
+ * A photo, held inline as a data URL so it travels with the log: a receipt
+ * stored anywhere else would go missing exactly when a payer queried the claim.
+ * Images are downscaled before they get here - the log syncs through a Drive
+ * file, and a few unshrunk phone photos would dwarf every other record in it.
+ */
+export interface Attachment extends BaseRecord {
+  mimeType: string;
+  dataUrl: string;
+  bytes: number;
+  attachedToType: string;
+  attachedToId: Id;
+}
+
 export interface Tag extends BaseRecord {
   label: string;
   colour: string;

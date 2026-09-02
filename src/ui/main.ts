@@ -4,12 +4,14 @@ import { makeEvent, type DomainEvent } from "../domain/events";
 import { live } from "../domain/replay";
 import { owedByPayer } from "../domain/queries";
 import { expenseAsMinutes, splitByPercent } from "../domain/expenseTime";
-import { tripClaim } from "../domain/mileage";
+import { tripShares } from "../domain/mileage";
+import { checkShift, checkExpense, checkTrip, isSubmittable, type Violation } from "../domain/invariants";
+import { shrinkImage, readableSize } from "./photo";
 import { syncOnce } from "../store/sync";
 import { connectDrive, driveRemote } from "../store/googleDrive";
 import { newId, nowInstant } from "../domain/primitives";
 import { splitShiftAt, mergeShifts } from "../domain/operations";
-import type { Shift, Expense, Client, Trip } from "../domain/entities";
+import type { Shift, Expense, Client, Trip, Note, Attachment } from "../domain/entities";
 
 const db = new RespiteDb();
 const dev = deviceId();
@@ -34,6 +36,8 @@ const ui = {
   /** Kept across re-renders so ticking a person does not wipe what was typed. */
   draft: { desc: "", amt: "" },
   tripFor: {} as Record<string, number>,
+  /** Shares being edited on an existing expense, seeded from what it already has. */
+  editSplit: {} as Record<string, number>,
   tripDraft: { km: "", purpose: "", rate: "" },
   sync: {
     token: null as string | null,
@@ -112,6 +116,16 @@ function connectionWarning(): { text: string; urgent: boolean } | null {
   return { text: `Google sign-in good for about ${Math.floor(left)} more days.`, urgent: false };
 }
 
+/**
+ * Problems worth showing. The checks have always existed and were never run,
+ * so a record could be unclaimable without anything saying so until a payer
+ * queried it.
+ */
+function problems(list: Violation[]): string {
+  if (!list.length) return "";
+  return `<p class="flag">${list.map((v) => v.message).join(" · ")}</p>`;
+}
+
 const TRASH = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>`;
 
 /** A trash button that asks before it acts. */
@@ -180,6 +194,8 @@ async function render() {
   const shiftsAll = live(store, "shift") as unknown as Shift[];
   const allExpenses = live(store, "expense") as unknown as Expense[];
   const allTrips = live(store, "trip") as unknown as Trip[];
+  const notes = live(store, "note") as unknown as Note[];
+  const attachments = live(store, "attachment") as unknown as Attachment[];
   const trips = allTrips.filter((t) => !t.archived && t.reimbursementStatus !== "paid");
   // Archived records and settled expenses drop out of the working views but
   // stay in every total, and stay restorable.
@@ -218,8 +234,8 @@ async function render() {
       </div>
     </section>
     ${ui.view.as === "me" ? ""
-      : ui.view.as === "archived" ? archivedView(archived, allShifts, allExpenses, owed, name)
-      : shareView(ui.view.as, ui.view.clientId || clients[0]?.id || "", allShifts, expenses, everyone, name)}
+      : ui.view.as === "archived" ? archivedView(archived, shiftsAll, allExpenses, owed, name, allTrips)
+      : shareView(ui.view.as, ui.view.clientId || clients[0]?.id || "", allShifts, expenses, everyone, name, trips, notes)}
 
     ${ui.view.as !== "me" ? "" : `
     <div class="grid">
@@ -293,9 +309,10 @@ async function render() {
             <th class="n" data-sort="shifts:pay">Pay ${arrow(ui.sort.shifts, "pay")}</th></tr>
         ${shiftRows.map((r) => `<tr class="click ${ui.openShift === r.id ? "open" : ""}" data-shift="${r.id}">
             <td>${day(r.startAt)} ${hhmm(r.startAt)}\u2013${hhmm(r.endAt)}</td>
-            <td>${r.people}</td><td class="n">${dur(r.minutes)}</td><td class="n">${money(r.pay)}</td></tr>`).join("")}
+            <td>${r.people}${problems(checkShift(allShifts.find((s) => s.id === r.id)!))}</td>
+            <td class="n">${dur(r.minutes)}</td><td class="n">${money(r.pay)}</td></tr>`).join("")}
       </table>` : `<p class="empty">No finished shifts yet.</p>`}
-      ${ui.openShift ? shiftDetail(allShifts.find((s) => s.id === ui.openShift)!, expenses, done, name, clients) : ""}
+      ${ui.openShift ? shiftDetail(allShifts.find((s) => s.id === ui.openShift)!, expenses, done, name, clients, notes) : ""}
     </section>
 
     <section class="card">
@@ -308,11 +325,28 @@ async function render() {
         ${expRows.map((e) => ui.editing === e.id
           ? `<tr><td colspan="4"><div class="row">
                <input id="ed" value="${e.description}" />
-               <input id="ea" type="number" step="0.01" value="${(e.totalAmount / 100).toFixed(2)}" />
+               <input id="ea" type="number" step="0.01" value="${(e.totalAmount / 100).toFixed(2)}" style="max-width:120px" />
                <button class="tiny" data-save-exp="${e.id}">Save</button>
-               <button class="tiny ghost" data-cancel="1">Cancel</button></div></td></tr>`
+               <button class="tiny ghost" data-cancel="1">Cancel</button></div>
+               <p class="sub" style="margin:8px 0 4px">Who it was for. Shares must add up to 100%.</p>
+               <table><tbody>${clients.map((c) => {
+                 const existing = (expenses.find((x) => x.id === e.id)?.splits ?? []).find((sp) => sp.clientId === c.id);
+                 const pct = ui.editSplit[c.id];
+                 const on = pct !== undefined;
+                 return `<tr><td style="width:26px"><input type="checkbox" data-efor="${c.id}" ${on ? "checked" : ""} style="width:auto" /></td>
+                   <td>${c.name}${existing ? `<span class="sub"> was ${money(existing.amount)}</span>` : ""}</td>
+                   <td class="n" style="width:110px">${on ? `<input type="number" data-epct="${c.id}" value="${pct.toFixed(1)}" step="0.1" style="max-width:90px" />%` : `<span class="sub">not included</span>`}</td></tr>`;
+               }).join("")}</tbody></table></td></tr>`
           : `<tr><td>${e.description}<br><span class="sub">${(expenses.find((x) => x.id === e.id)?.splits ?? [])
-                 .map((sp) => `${name(sp.clientId)} ${money(sp.amount)}`).join(" · ") || "nobody"}</span></td>
+                 .map((sp) => `${name(sp.clientId)} ${money(sp.amount)}`).join(" · ") || "nobody"}</span>
+               ${(() => {
+                 const ex = expenses.find((x) => x.id === e.id)!;
+                 const shots = attachments.filter((a) => ex.receiptAttachmentIds.includes(a.id));
+                 return `<div class="receipts">${shots.map((a) => `<span class="shot"><img src="${a.dataUrl}" alt="Receipt" />
+                     <button class="tiny ghost" data-unshot="${ex.id}:${a.id}">Remove</button></span>`).join("")}
+                   <label class="file tiny">${shots.length ? "Add another" : "Add receipt"}<input type="file" accept="image/*" capture="environment" data-shot="${ex.id}" hidden /></label></div>`;
+               })()}
+               ${problems(checkExpense(expenses.find((x) => x.id === e.id)!))}</td>
              <td>${day(e.occurredAt)}</td><td class="n">${money(e.totalAmount)}</td>
              <td class="n"><button class="tiny ghost" data-edit="${e.id}">Edit</button>
              <button class="tiny ghost" data-paid="${e.id}">Mark paid</button>
@@ -351,7 +385,7 @@ async function render() {
       <div class="row"><button id="addTrip">Log trip</button></div>
       <p class="sub">Fuel at the pump is not claimed - mileage already covers running the car, so claiming both would bill the same cost twice.</p>
       ${trips.length ? `<table style="margin-top:10px">
-        ${trips.map((t) => `<tr><td>${t.purpose || "Trip"}<br><span class="sub">${day(t.occurredAt)} · ${t.distance}${t.distanceUnit} · ${t.splits.map((sp) => `${name(sp.clientId)} ${money(sp.claimAmount)}`).join(" · ")}</span></td>
+        ${trips.map((t) => `<tr><td>${t.purpose || "Trip"}<br><span class="sub">${day(t.occurredAt)} · ${t.distance}${t.distanceUnit} · ${t.splits.map((sp) => `${name(sp.clientId)} ${money(sp.claimAmount)}`).join(" · ")}</span>${problems(checkTrip(t))}</td>
           <td class="n">${money(t.splits.reduce((a, sp) => a + sp.claimAmount, 0))}</td>
           <td class="n">${trash("trip", t.id, `${t.purpose || "Trip"} (${t.distance}${t.distanceUnit})`, "trip")}</td></tr>`).join("")}
       </table>` : `<p class="empty">No trips yet.</p>`}` : `<p class="empty">Add someone you support first.</p>`}
@@ -413,10 +447,11 @@ async function render() {
  * shifts you have tidied off the list, and expenses that have been paid.
  * Nothing here is deleted, and anything still owed keeps counting in Owed.
  */
-function archivedView(people: Client[], shifts: Shift[], expenses: Expense[], owed: ReturnType<typeof owedByPayer>, name: (id: string) => string) {
+function archivedView(people: Client[], shifts: Shift[], expenses: Expense[], owed: ReturnType<typeof owedByPayer>, name: (id: string) => string, trips: Trip[]) {
   const archivedShifts = shifts.filter((s) => s.archived);
   const paidExpenses = expenses.filter((e) => e.archived || e.reimbursementStatus === "paid");
-  const nothing = !people.length && !archivedShifts.length && !paidExpenses.length;
+  const archivedTrips = trips.filter((t) => t.archived || t.reimbursementStatus === "paid");
+  const nothing = !people.length && !archivedShifts.length && !paidExpenses.length && !archivedTrips.length;
 
   return `<section class="card view-archived">
     <h2>Archived people</h2>
@@ -447,10 +482,18 @@ function archivedView(people: Client[], shifts: Shift[], expenses: Expense[], ow
       <td class="n"><button class="tiny pink" data-unpaid="${e.id}">Reopen</button></td></tr>`).join("")}</tbody></table>`
       : `<p class="empty">Nothing paid off yet.</p>`}
   </section>
+  <section class="card">
+    <h2>Mileage settled</h2>
+    ${archivedTrips.length ? `<table><tbody>${archivedTrips.map((t) => `<tr>
+      <td>${t.purpose || "Trip"}<br><span class="sub">${day(t.occurredAt)} · ${t.distance}${t.distanceUnit}</span></td>
+      <td class="n">${money(t.splits.reduce((a, sp) => a + sp.claimAmount, 0))}</td>
+      <td class="n"><button class="tiny pink" data-untrip="${t.id}">Reopen</button></td></tr>`).join("")}</tbody></table>`
+      : `<p class="empty">No settled trips.</p>`}
+  </section>
   ${nothing ? `<section class="card"><p class="sub">Nothing has been archived. Archiving puts things away without deleting them — you can bring anything back from here.</p></section>` : ""}`;
 }
 
-function shareView(as: "guardian" | "payer", clientId: string, shifts: Shift[], expenses: Expense[], clients: Client[], name: (id: string) => string) {
+function shareView(as: "guardian" | "payer", clientId: string, shifts: Shift[], expenses: Expense[], clients: Client[], name: (id: string) => string, trips: Trip[], notes: Note[]) {
   const who = clients.find((c) => c.id === clientId);
   if (!who) return `<section class="card"><p class="empty">Add someone first.</p></section>`;
 
@@ -468,11 +511,15 @@ function shareView(as: "guardian" | "payer", clientId: string, shifts: Shift[], 
 
   const loose = expenses.filter((e) => !e.shiftId).flatMap((e) => e.splits.filter((sp) => sp.clientId === clientId));
   const looseTotal = loose.reduce((t, sp) => t + sp.amount, 0);
+  // Mileage was missing from both shared views, so a payer saw a claim smaller
+  // than the one they will actually be sent.
+  const theirTrips = trips.filter((t) => t.splits.some((sp) => sp.clientId === clientId));
+  const mileageTotal = theirTrips.flatMap((t) => t.splits.filter((sp) => sp.clientId === clientId)).reduce((a, sp) => a + sp.claimAmount, 0);
   const rate = who.defaultRate ?? 0;
 
   const totalWorked = rows.reduce((t, r) => t + r.worked, 0);
-  const totalExtra = rows.reduce((t, r) => t + r.extra, 0) + expenseAsMinutes(looseTotal, rate);
-  const totalMoney = rows.reduce((t, r) => t + Math.round(r.worked / 60 * r.p.payRate) + r.share, 0) + looseTotal;
+  const totalExtra = rows.reduce((t, r) => t + r.extra, 0) + expenseAsMinutes(looseTotal + mileageTotal, rate);
+  const totalMoney = rows.reduce((t, r) => t + Math.round(r.worked / 60 * r.p.payRate) + r.share, 0) + looseTotal + mileageTotal;
 
   return `<section class="card view-${as}">
     <h2>${as === "guardian" ? "Guardian view" : "Payer view"} — ${who.name}</h2>
@@ -490,13 +537,27 @@ function shareView(as: "guardian" | "payer", clientId: string, shifts: Shift[], 
              <td class="n">${r.share ? money(r.share) : "—"}</td>
              <td class="n">${money(Math.round(r.worked / 60 * r.p.payRate) + r.share)}</td></tr>`).join("")}
     </table>` : `<p class="empty">Nothing recorded for ${who.name} yet.</p>`}
+    ${theirTrips.length ? `<h3 style="margin-top:14px">Mileage</h3>
+      <table><tbody>${theirTrips.map((t) => {
+        const share = t.splits.filter((sp) => sp.clientId === clientId).reduce((a, sp) => a + sp.claimAmount, 0);
+        return `<tr><td>${t.purpose || "Trip"}<br><span class="sub">${day(t.occurredAt)} · ${t.distance}${t.distanceUnit}</span></td>
+          <td class="n">${as === "payer" ? `+${dur(expenseAsMinutes(share, rate))}` : money(share)}</td></tr>`;
+      }).join("")}</tbody></table>` : ""}
     ${looseTotal ? `<p class="sub" style="margin-top:8px">${as === "payer"
         ? `Expenses not tied to a shift: +${dur(expenseAsMinutes(looseTotal, rate))} at ${money(rate)}/hr.`
         : `Expenses not tied to a shift: ${money(looseTotal)}.`}</p>` : ""}
+    ${(() => {
+      // Only notes explicitly shared with THIS audience, and only on shifts
+      // this person was actually on.
+      const ids = new Set(theirShifts.map((x) => x.id));
+      const shared = notes.filter((n) => ids.has(n.attachedToId) && n.visibility[as]);
+      return shared.length ? `<h3 style="margin-top:14px">Notes</h3>
+        <table><tbody>${shared.map((n) => `<tr><td>${n.body}<br><span class="sub">${day(n.occurredAt)}</span></td></tr>`).join("")}</tbody></table>` : "";
+    })()}
     <div class="grid" style="margin-top:12px">
       ${as === "payer"
         ? `<div class="stat"><b>${dur(totalWorked)}</b><span>time with ${who.name}</span></div>
-           <div class="stat"><b>+${dur(totalExtra)}</b><span>from expenses</span></div>
+           <div class="stat"><b>+${dur(totalExtra)}</b><span>from expenses and mileage</span></div>
            <div class="stat"><b>${dur(totalWorked + totalExtra)}</b><span>billable at ${money(rate)}/hr</span></div>`
         : `<div class="stat"><b>${dur(totalWorked)}</b><span>time</span></div>
            <div class="stat"><b>${money(totalMoney)}</b><span>total owed</span></div>`}
@@ -524,8 +585,9 @@ function confirmModal() {
   </div></div>`;
 }
 
-function shiftDetail(s: Shift, expenses: Expense[], done: Shift[], name: (id: string) => string, clients: Client[]) {
+function shiftDetail(s: Shift, expenses: Expense[], done: Shift[], name: (id: string) => string, clients: Client[], notes: Note[]) {
   const attached = expenses.filter((e) => e.shiftId === s.id);
+  const shiftNotes = notes.filter((n) => n.attachedToId === s.id);
   const others = done.filter((d) => d.id !== s.id);
   return `<div class="detail">
     <h3>Shift detail</h3>
@@ -547,6 +609,20 @@ function shiftDetail(s: Shift, expenses: Expense[], done: Shift[], name: (id: st
       <button class="tiny pink" data-add-person="${s.id}">Add person</button>
     </div>` : ""}
     <button class="tiny" data-save-people="${s.id}" style="margin-top:8px">Save who was there</button>
+
+    <h3 style="margin-top:14px">Notes</h3>
+    ${shiftNotes.length ? `<table><tbody>${shiftNotes.map((n) => `<tr>
+      <td>${n.body}<br><span class="sub">${n.visibility.payer || n.visibility.guardian
+        ? `shared with ${[n.visibility.payer ? "payer" : "", n.visibility.guardian ? "guardian" : ""].filter(Boolean).join(" and ")}`
+        : "private to you"}</span></td>
+      <td class="n">${trash("note", n.id, n.body.slice(0, 40), "note")}</td></tr>`).join("")}</tbody></table>`
+      : `<p class="empty">No notes on this shift.</p>`}
+    <div class="row"><input id="noteBody" placeholder="What happened?" /><button class="tiny" data-add-note="${s.id}">Add note</button></div>
+    <p class="sub"><label style="display:inline;margin-right:12px"><input type="checkbox" id="notePayer" style="width:auto" /> visible to payer</label>
+      <label style="display:inline"><input type="checkbox" id="noteGuardian" style="width:auto" /> visible to guardian</label>
+      — private to you unless ticked.</p>
+
+    <p class="sub" style="margin-top:12px"><label style="display:inline"><input type="checkbox" id="isIncident" ${s.isIncident ? "checked" : ""} data-incident="${s.id}" style="width:auto" /> <b>Mark this shift as an incident</b></label></p>
     <p style="margin:6px 0">${attached.length ? attached.map((e) => `<span class="pill warn">${e.description} ${money(e.totalAmount)}</span>`).join("") : `<span class="empty">No expenses attached</span>`}</p>
     <div class="acts">
       <button class="tiny ghost" data-split="${s.id}">Split in half</button>
@@ -607,6 +683,23 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     ui.msg = `${name(s.participants[i].clientId)} removed from this shift.`;
   }));
 
+  all("[data-add-note]", (el) => el.onclick = () => go(async () => {
+    const body = $("noteBody")!.value.trim();
+    if (!body) throw new Error("Write the note first.");
+    await emit("note", newId(), {
+      body, attachedToType: "shift", attachedToId: el.dataset.addNote!,
+      occurredAt: nowInstant(), recordedAt: nowInstant(),
+      zone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      // Private unless explicitly shared: a note written for yourself should
+      // never reach a family because sharing was the default.
+      visibility: { me: true, payer: ($("notePayer") as HTMLInputElement).checked, guardian: ($("noteGuardian") as HTMLInputElement).checked },
+      tags: [], customFields: {},
+    });
+  }));
+
+  all("[data-incident]", (el) => (el as HTMLInputElement).onchange = () => go(() =>
+    emit("shift", el.dataset.incident!, { isIncident: (el as HTMLInputElement).checked })));
+
   all("[data-add-person]", (el) => el.onclick = () => go(async () => {
     const s = allShifts.find((d) => d.id === el.dataset.addPerson)!;
     const clientId = ($("addWho") as unknown as HTMLSelectElement).value;
@@ -654,6 +747,7 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     go(() => emit("expense", el.dataset.paid!, { reimbursementStatus: "paid" }));
   });
   all("[data-unarch-shift]", (el) => el.onclick = () => go(() => emit("shift", el.dataset.unarchShift!, { archived: false })));
+  all("[data-untrip]", (el) => el.onclick = () => go(() => emit("trip", el.dataset.untrip!, { reimbursementStatus: "unclaimed", archived: false })));
   all("[data-unpaid]", (el) => el.onclick = () => go(() => emit("expense", el.dataset.unpaid!, { reimbursementStatus: "unclaimed", archived: false })));
 
   all("[data-archive]", (el) => el.onclick = (e) => {
@@ -665,7 +759,53 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     go(() => emit("client", el.dataset.restore!, { archived: false }));
   });
 
-  all("[data-edit]", (el) => el.onclick = (e) => { e.stopPropagation(); ui.editing = el.dataset.edit!; render(); });
+  all("[data-edit]", (el) => el.onclick = (e) => {
+    e.stopPropagation();
+    ui.editing = el.dataset.edit!;
+    // Seed the split editor from what the expense already has, so opening it
+    // and saving without touching anything changes nothing.
+    const ex = allExpenses.find((x) => x.id === ui.editing);
+    ui.editSplit = {};
+    if (ex && ex.totalAmount) {
+      for (const sp of ex.splits) ui.editSplit[sp.clientId] = (sp.amount / ex.totalAmount) * 100;
+    }
+    render();
+  });
+
+  all("[data-shot]", (el) => (el as HTMLInputElement).onchange = (ev: any) => go(async () => {
+    const file = ev.target.files?.[0];
+    if (!file) return;
+    const expenseId = el.dataset.shot!;
+    const { dataUrl, bytes } = await shrinkImage(file);
+    const attachmentId = newId();
+    await emit("attachment", attachmentId, {
+      mimeType: "image/jpeg", dataUrl, bytes,
+      attachedToType: "expense", attachedToId: expenseId,
+      occurredAt: nowInstant(), recordedAt: nowInstant(),
+      zone: Intl.DateTimeFormat().resolvedOptions().timeZone, tags: [], customFields: {},
+    });
+    const ex = allExpenses.find((x) => x.id === expenseId)!;
+    await emit("expense", expenseId, { receiptAttachmentIds: [...ex.receiptAttachmentIds, attachmentId] });
+    ui.msg = `Receipt attached (${readableSize(bytes)}).`;
+  }));
+
+  all("[data-unshot]", (el) => el.onclick = () => go(async () => {
+    const [expenseId, attachmentId] = el.dataset.unshot!.split(":");
+    const ex = allExpenses.find((x) => x.id === expenseId)!;
+    await emit("expense", expenseId, { receiptAttachmentIds: ex.receiptAttachmentIds.filter((i) => i !== attachmentId) });
+    await emit("attachment", attachmentId, { deleted: true });
+  }));
+
+  all("[data-efor]", (el) => (el as HTMLInputElement).onchange = () => {
+    const id = el.dataset.efor!;
+    if (ui.editSplit[id] === undefined) ui.editSplit[id] = 0; else delete ui.editSplit[id];
+    const ids = Object.keys(ui.editSplit);
+    ids.forEach((x) => (ui.editSplit[x] = 100 / ids.length));
+    render();
+  });
+  all("[data-epct]", (el) => (el as HTMLInputElement).oninput = () => {
+    ui.editSplit[el.dataset.epct!] = parseFloat((el as HTMLInputElement).value || "0");
+  });
   all("[data-cancel]", (el) => el.onclick = (e) => { e.stopPropagation(); ui.editing = null; ui.openShift = null; ui.msg = ""; render(); });
 
   all("[data-ask]", (el) => el.onclick = (e) => {
@@ -700,8 +840,16 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
 
   all("[data-save-exp]", (el) => el.onclick = () => go(async () => {
     const cents = Math.round(parseFloat($("ea")!.value || "0") * 100);
-    await emit("expense", el.dataset.saveExp!, { description: $("ed")!.value || "Expense", totalAmount: cents });
+    const ids = Object.keys(ui.editSplit);
+    if (!ids.length) throw new Error("An expense has to be for someone.");
+    const parts = splitByPercent(cents, ids.map((id) => ui.editSplit[id]));
+    await emit("expense", el.dataset.saveExp!, {
+      description: $("ed")!.value || "Expense",
+      totalAmount: cents,
+      splits: ids.map((id, i) => ({ clientId: id, payerPartyId: `payer-${id}`, amount: parts[i] })),
+    });
     ui.editing = null;
+    ui.editSplit = {};
   }));
 
   all("[data-save-shift]", (el) => el.onclick = () => go(async () => {
@@ -906,7 +1054,7 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
       const out = document.getElementById(`tv-${id}`);
       if (!out) return;
       try {
-        out.textContent = km && rate ? money(tripClaim(km, Math.round(rate), ids.map((x) => ui.tripFor[x])).shares[i]) : "";
+        out.textContent = km && rate ? money(tripShares(km, Math.round(rate), ids.map((x) => ui.tripFor[x])).shares[i].claim) : "";
       } catch { out.textContent = ""; }
     });
   };
@@ -933,16 +1081,18 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     if (!distance) throw new Error("Enter the distance.");
     if (!rate) throw new Error("Enter the rate per km or mile, in cents.");
     if (!ids.length) throw new Error("Choose who was in the car.");
-    const { shares } = tripClaim(distance, rate, ids.map((id) => ui.tripFor[id]));
+    const { shares } = tripShares(distance, rate, ids.map((id) => ui.tripFor[id]));
     await emit("trip", newId(), {
       distance, distanceUnit: ($("tunit") as unknown as HTMLSelectElement).value,
       purpose: $("tpurpose")!.value || "Trip", isClaimable: true,
       occurredAt: nowInstant(), recordedAt: nowInstant(),
       zone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       shiftId: open?.id ?? null, reimbursementStatus: "unclaimed", tags: [], customFields: {},
+      // distanceShare is this person's kilometres, not their percentage: the
+      // payer recomputes distance x rate, and checkTrip enforces the same.
       splits: ids.map((id, i) => ({
         clientId: id, payerPartyId: `payer-${id}`,
-        distanceShare: ui.tripFor[id] / 100, rateApplied: rate, claimAmount: shares[i],
+        distanceShare: shares[i].distanceShare, rateApplied: rate, claimAmount: shares[i].claim,
       })),
     });
     ui.tripFor = {};
@@ -964,7 +1114,18 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
   };
 
   all("[data-submit]", (el) => el.onclick = () => go(async () => {
-    await restamp(el.dataset.submit!, "unclaimed", "submitted");
+    const payer = el.dataset.submit!;
+    // Refuse to send a claim built on records that fail their own checks: the
+    // payer would query it, and by then it has your name on it.
+    const bad = [
+      ...allShifts.filter((s) => s.reimbursementStatus === "unclaimed" && s.participants.some((p) => p.payerPartyId === payer)).flatMap(checkShift),
+      ...allExpenses.filter((e) => e.reimbursementStatus === "unclaimed" && e.splits.some((sp) => sp.payerPartyId === payer)).flatMap(checkExpense),
+      ...allTrips.filter((t) => t.reimbursementStatus === "unclaimed" && t.splits.some((sp) => sp.payerPartyId === payer)).flatMap(checkTrip),
+    ];
+    if (!isSubmittable(bad)) {
+      throw new Error(`Not ready to send: ${bad.map((v) => v.message).join("; ")}`);
+    }
+    await restamp(payer, "unclaimed", "submitted");
     ui.msg = "Marked as sent. It stays visible under Submitted until it is paid.";
   }));
   all("[data-settle]", (el) => el.onclick = () => go(async () => {

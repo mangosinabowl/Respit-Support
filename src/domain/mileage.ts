@@ -1,20 +1,37 @@
 import type { Money } from "./primitives";
-import { splitByPercent } from "./expenseTime";
+
+export interface TripShare {
+  /** This person's portion of the distance, in the trip's own unit. */
+  distanceShare: number;
+  claim: Money;
+}
 
 /**
- * What a trip is worth, and how it divides between the people carried.
+ * Divides a trip between the people carried.
  *
- * Distance times rate, rounded to whole cents once at the end rather than per
- * person, then divided by the agreed shares so the parts always sum back to
- * the claim exactly.
+ * Each person gets a portion of the DISTANCE, and their claim is that portion
+ * times the snapshotted rate. That is the shape checkTrip enforces: a split
+ * whose claim does not equal its own distance times its own rate is rejected,
+ * because a payer can and will recompute it.
  *
- * Fuel at the pump is deliberately not an input here: it is recorded on the
- * trip for the worker's own records and never enters a claim (spec 4.6).
- * Claiming both mileage and fuel would be billing the same cost twice.
+ * The total is therefore the sum of the individual claims, which can differ by
+ * a cent from rounding the whole trip once. Per-split correctness wins: each
+ * line has to stand on its own on an invoice.
+ *
+ * Fuel at the pump is deliberately not an input. It is recorded on the trip for
+ * the worker's own records and never enters a claim (spec 4.6) - mileage
+ * already covers running the car, so claiming both bills the same cost twice.
  */
-export function tripClaim(distance: number, ratePerUnit: Money, percents: number[]): { total: Money; shares: Money[] } {
+export function tripShares(distance: number, ratePerUnit: Money, percents: number[]): { shares: TripShare[]; total: Money } {
   if (!Number.isFinite(distance) || distance < 0) throw new Error("Distance must be zero or more.");
   if (ratePerUnit < 0) throw new Error("A mileage rate cannot be negative.");
-  const total = Math.round(distance * ratePerUnit);
-  return { total, shares: splitByPercent(total, percents) };
+  const sum = percents.reduce((t, p) => t + p, 0);
+  if (percents.length && Math.abs(sum - 100) > 1e-9) {
+    throw new Error(`Shares must add up to 100%, got ${sum}%.`);
+  }
+  const shares = percents.map((p) => {
+    const distanceShare = (distance * p) / 100;
+    return { distanceShare, claim: Math.round(distanceShare * ratePerUnit) };
+  });
+  return { shares, total: shares.reduce((t, s) => t + s.claim, 0) };
 }

@@ -82,3 +82,8 @@ select.view-guardian{background:var(--pink-soft);border-color:var(--pink)}
 select.view-payer{background:var(--cyan-soft);border-color:var(--cyan)}
 .view-archived{background:var(--orange-soft);border-left:4px solid var(--orange)}
 select.view-archived{background:var(--orange-soft);border-color:var(--orange)}
+.flag{color:#8a3520;background:var(--pink-soft);padding:4px 7px;margin:5px 0 0;font-size:12px;display:inline-block}
+.receipts{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px}
+.shot{display:inline-flex;flex-direction:column;gap:3px;align-items:center}
+.shot img{width:54px;height:54px;object-fit:cover;border:1px solid var(--line)}
+.file.tiny{padding:5px 9px;font-size:13px}
