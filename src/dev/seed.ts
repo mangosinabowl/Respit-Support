@@ -15,10 +15,23 @@ export async function seedDemoData(db: RespiteDb, deviceId: string): Promise<num
   let seq = 0;
   const events: DomainEvent[] = [];
   const uid = () => crypto.randomUUID();
-  const meta = (at: string) => ({ occurredAt: at, recordedAt: at, zone: "America/Vancouver", tags: [], customFields: {} });
-  const put = (entityType: string, entityId: string, fields: Record<string, unknown>, at: string) => {
+  const RECORDED_AT = new Date(2026, 5, 1, 9).toISOString();
+  /**
+   * occurredAt is when the work happened; recordedAt is when it was written
+   * down, and every seeded record is written down at the same early moment.
+   *
+   * They must not be the same value. Some demo records are dated in the future,
+   * and giving them a future recordedAt made them beat any real edit made
+   * today: last-write-wins compares recordedAt, so a change would be applied
+   * and then silently lose to the record it was changing.
+   */
+  const RECORDED = RECORDED_AT;
+  const meta = (at: string) => ({ occurredAt: at, recordedAt: RECORDED, zone: "America/Vancouver", tags: [], customFields: {} });
+  const put = (entityType: string, entityId: string, fields: Record<string, unknown>, _at: string) => {
     seq += 1;
-    events.push({ eventId: uid(), entityType, entityId, fields, recordedAt: at, deviceId, seq } as unknown as DomainEvent);
+    // The EVENT's recordedAt decides ordering, so it uses the same early moment
+    // rather than the date the thing happened on.
+    events.push({ eventId: uid(), entityType, entityId, fields, recordedAt: RECORDED, deviceId, seq } as unknown as DomainEvent);
   };
   const iso = (y: number, m: number, d: number, hh: number, mm = 0) => new Date(y, m - 1, d, hh, mm).toISOString();
 
