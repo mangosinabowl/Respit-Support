@@ -153,6 +153,17 @@ async function render() {
     </section>
 
     <section class="card">
+      <h2>Log a past shift</h2>
+      ${clients.length ? `<p class="sub">For a shift you did not time on the day. Add anyone else who was there, with their own hours, once it is created.</p>
+      <div class="row">
+        <select id="pastWho">${clients.map((c) => `<option value="${c.id}">${c.name}</option>`).join("")}</select>
+        <input id="pastFrom" type="datetime-local" title="Started" />
+        <input id="pastTo" type="datetime-local" title="Ended" />
+        <button id="logPast" class="ghost">Log it</button>
+      </div>` : `<p class="empty">Add someone you support first.</p>`}
+    </section>
+
+    <section class="card">
       <h2>People</h2>
       <table><tbody>
         ${clients.map((c) => ui.editing === c.id
@@ -181,7 +192,7 @@ async function render() {
             <td>${day(r.startAt)} ${hhmm(r.startAt)}\u2013${hhmm(r.endAt)}</td>
             <td>${r.people}</td><td class="n">${dur(r.minutes)}</td><td class="n">${money(r.pay)}</td></tr>`).join("")}
       </table>` : `<p class="empty">No finished shifts yet.</p>`}
-      ${ui.openShift ? shiftDetail(allShifts.find((s) => s.id === ui.openShift)!, expenses, done, name) : ""}
+      ${ui.openShift ? shiftDetail(allShifts.find((s) => s.id === ui.openShift)!, expenses, done, name, clients) : ""}
     </section>
 
     <section class="card">
@@ -244,7 +255,7 @@ async function render() {
     </section>`}
     ${confirmModal()}`;
 
-  wire(open, clients, done, expenses);
+  wire(open, clients, done, expenses, allShifts, name);
 }
 
 /**
@@ -369,7 +380,7 @@ function confirmModal() {
   </div></div>`;
 }
 
-function shiftDetail(s: Shift, expenses: Expense[], done: Shift[], name: (id: string) => string) {
+function shiftDetail(s: Shift, expenses: Expense[], done: Shift[], name: (id: string) => string, clients: Client[]) {
   const attached = expenses.filter((e) => e.shiftId === s.id);
   const others = done.filter((d) => d.id !== s.id);
   return `<div class="detail">
@@ -377,7 +388,21 @@ function shiftDetail(s: Shift, expenses: Expense[], done: Shift[], name: (id: st
     <div class="row"><label style="flex:0 0 auto">Start</label><input id="sst" type="datetime-local" value="${forInput(s.startAt)}" />
       <label style="flex:0 0 auto">End</label><input id="sen" type="datetime-local" value="${forInput(s.endAt!)}" />
       <button class="tiny" data-save-shift="${s.id}">Save</button></div>
-    <p style="margin:10px 0 4px">${s.participants.map((p) => `<span class="pill">${name(p.clientId)} ${hhmm(p.inAt)}\u2013${hhmm(p.outAt)} @ ${money(p.payRate)}/hr</span>`).join("")}</p>
+    <h3 style="margin-top:12px">Who was there</h3>
+    <table><tbody>${s.participants.map((p, i) => `<tr>
+      <td>${name(p.clientId)}</td>
+      <td><input type="datetime-local" data-pin="${i}" value="${forInput(p.inAt)}" style="max-width:195px" /></td>
+      <td><input type="datetime-local" data-pout="${i}" value="${forInput(p.outAt)}" style="max-width:195px" /></td>
+      <td class="n"><input type="number" step="0.5" data-prate="${i}" value="${(p.payRate / 100).toFixed(2)}" style="max-width:85px" title="$/hr" /></td>
+      <td class="n">${ruleSelect(`prule-${i}`, p.timeRule)}</td>
+      <td class="n"><button class="tiny ghost" data-drop="${i}">Remove</button></td></tr>`).join("")}</tbody></table>
+    ${clients.filter((c) => !s.participants.some((p) => p.clientId === c.id)).length ? `<div class="row">
+      <select id="addWho">${clients.filter((c) => !s.participants.some((p) => p.clientId === c.id)).map((c) => `<option value="${c.id}">${c.name}</option>`).join("")}</select>
+      <input id="addIn" type="datetime-local" value="${forInput(s.startAt)}" title="Arrived" />
+      <input id="addOut" type="datetime-local" value="${forInput(s.endAt ?? s.startAt)}" title="Left" />
+      <button class="tiny pink" data-add-person="${s.id}">Add person</button>
+    </div>` : ""}
+    <button class="tiny" data-save-people="${s.id}" style="margin-top:8px">Save who was there</button>
     <p style="margin:6px 0">${attached.length ? attached.map((e) => `<span class="pill warn">${e.description} ${money(e.totalAmount)}</span>`).join("") : `<span class="empty">No expenses attached</span>`}</p>
     <div class="acts">
       <button class="tiny ghost" data-split="${s.id}">Split in half</button>
@@ -390,7 +415,7 @@ function shiftDetail(s: Shift, expenses: Expense[], done: Shift[], name: (id: st
   </div>`;
 }
 
-function wire(open: Shift | undefined, clients: Client[], done: Shift[], expenses: Expense[]) {
+function wire(open: Shift | undefined, clients: Client[], done: Shift[], expenses: Expense[], allShifts: Shift[], name: (id: string) => string) {
   const $ = (id: string) => document.getElementById(id) as HTMLInputElement | null;
   const go = async (fn: () => Promise<void>) => { try { await fn(); } catch (err: any) { ui.msg = err.message; } render(); };
   const all = (sel: string, fn: (el: HTMLElement) => void) => document.querySelectorAll<HTMLElement>(sel).forEach(fn);
@@ -407,6 +432,73 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     ui.openShift = ui.openShift === el.dataset.shift ? null : el.dataset.shift!;
     ui.msg = "";
     render();
+  });
+
+  const readParticipants = (s: Shift) => s.participants.map((p, i) => {
+    const inAt = fromInput((document.querySelector(`[data-pin="${i}"]`) as HTMLInputElement).value);
+    const outAt = fromInput((document.querySelector(`[data-pout="${i}"]`) as HTMLInputElement).value);
+    const payRate = Math.round(parseFloat((document.querySelector(`[data-prate="${i}"]`) as HTMLInputElement).value || "0") * 100);
+    const timeRule = (document.getElementById(`prule-${i}`) as HTMLSelectElement).value as "fullPerPayer" | "splitEvenly";
+    if (Date.parse(outAt) < Date.parse(inAt)) throw new Error(`${name(p.clientId)} cannot leave before they arrived.`);
+    if (payRate < 0) throw new Error("A rate cannot be negative.");
+    return { ...p, inAt, outAt, payRate, timeRule };
+  });
+
+  all("[data-save-people]", (el) => el.onclick = () => go(async () => {
+    const s = allShifts.find((d) => d.id === el.dataset.savePeople)!;
+    const participants = readParticipants(s);
+    // Widen the shift to hold everyone, rather than silently clipping someone
+    // who arrived before it or left after it.
+    const startAt = participants.reduce((a, p) => (Date.parse(p.inAt) < Date.parse(a) ? p.inAt : a), s.startAt);
+    const endAt = participants.reduce((a, p) => (Date.parse(p.outAt) > Date.parse(a) ? p.outAt : a), s.endAt ?? s.startAt);
+    await emit("shift", s.id, { participants, startAt, endAt });
+    ui.msg = "Saved.";
+  }));
+
+  all("[data-drop]", (el) => el.onclick = () => go(async () => {
+    const s = allShifts.find((d) => d.id === ui.openShift)!;
+    const i = Number(el.dataset.drop);
+    if (s.participants.length === 1) throw new Error("A shift needs at least one person. Delete the shift instead.");
+    await emit("shift", s.id, { participants: s.participants.filter((_, j) => j !== i) });
+    ui.msg = `${name(s.participants[i].clientId)} removed from this shift.`;
+  }));
+
+  all("[data-add-person]", (el) => el.onclick = () => go(async () => {
+    const s = allShifts.find((d) => d.id === el.dataset.addPerson)!;
+    const clientId = ($("addWho") as unknown as HTMLSelectElement).value;
+    const inAt = fromInput($("addIn")!.value);
+    const outAt = fromInput($("addOut")!.value);
+    if (Date.parse(outAt) < Date.parse(inAt)) throw new Error("They cannot leave before they arrived.");
+    const c = clients.find((x) => x.id === clientId);
+    await emit("shift", s.id, {
+      participants: [...s.participants, {
+        clientId, payerPartyId: `payer-${clientId}`, inAt, outAt,
+        payRate: c?.defaultRate ?? 0, timeRule: c?.defaultTimeRule ?? "fullPerPayer",
+      }],
+      startAt: Date.parse(inAt) < Date.parse(s.startAt) ? inAt : s.startAt,
+      endAt: Date.parse(outAt) > Date.parse(s.endAt ?? s.startAt) ? outAt : s.endAt,
+    });
+    ui.msg = `${c?.name ?? "They"} added, ${hhmm(inAt)}–${hhmm(outAt)}.`;
+  }));
+
+  if ($("logPast")) $("logPast")!.onclick = () => go(async () => {
+    const clientId = ($("pastWho") as unknown as HTMLSelectElement).value;
+    const startAt = fromInput($("pastFrom")!.value);
+    const endAt = fromInput($("pastTo")!.value);
+    if (!$("pastFrom")!.value || !$("pastTo")!.value) throw new Error("Set when the shift started and ended.");
+    if (Date.parse(endAt) <= Date.parse(startAt)) throw new Error("The end must come after the start.");
+    const c = clients.find((x) => x.id === clientId);
+    await emit("shift", newId(), {
+      startAt, endAt,
+      // occurredAt is when the work happened; recordedAt is now. Keeping them
+      // apart is what makes a shift entered days later still sort correctly.
+      occurredAt: startAt, recordedAt: nowInstant(),
+      zone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      participants: [{ clientId, payerPartyId: `payer-${clientId}`, inAt: startAt, outAt: endAt,
+        payRate: c?.defaultRate ?? 0, timeRule: c?.defaultTimeRule ?? "fullPerPayer" }],
+      isIncident: false, reimbursementStatus: "unclaimed", tags: [], customFields: {},
+    });
+    ui.msg = "Past shift logged. Open it to add anyone else who was there.";
   });
 
   all("[data-arch-shift]", (el) => el.onclick = (e) => {
@@ -473,8 +565,18 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     const startAt = fromInput($("sst")!.value);
     const endAt = fromInput($("sen")!.value);
     if (Date.parse(endAt) <= Date.parse(startAt)) throw new Error("The end must come after the start.");
-    await emit("shift", s.id, { startAt, endAt, participants: s.participants.map((p) => ({ ...p, inAt: startAt, outAt: endAt })) });
-    ui.msg = "Shift updated.";
+    // Clamp each person into the new window rather than stamping the window
+    // onto everyone: overwriting their own times would erase who was actually
+    // there when, and bill the wrong people for the wrong hours.
+    await emit("shift", s.id, {
+      startAt, endAt,
+      participants: s.participants.map((p) => ({
+        ...p,
+        inAt: Date.parse(p.inAt) < Date.parse(startAt) ? startAt : p.inAt,
+        outAt: Date.parse(p.outAt) > Date.parse(endAt) ? endAt : p.outAt,
+      })),
+    });
+    ui.msg = "Shift times updated. Everyone kept their own arrival and leaving times.";
   }));
 
   all("[data-split]", (el) => el.onclick = () => go(async () => {
