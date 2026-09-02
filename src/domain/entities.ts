@@ -33,6 +33,12 @@ export interface Party extends BaseRecord {
 
 export interface Client extends BaseRecord {
   name: string;
+  /**
+   * Standing hourly rate in cents, used as the default when a shift starts.
+   * Changing it never alters a shift already logged: the rate in force at the
+   * time is snapshotted onto the participant (spec 6.3).
+   */
+  defaultRate?: Money;
   displayInitial: string;
   colour: string;
   dateOfBirth?: string;

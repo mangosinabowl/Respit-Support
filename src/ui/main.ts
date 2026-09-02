@@ -97,7 +97,7 @@ async function render() {
            }).join("")}</tbody></table>
            ${clients.filter((c) => !open.participants.some((p) => p.clientId === c.id)).length
              ? `<div class="row"><select id="arrive">${clients.filter((c) => !open.participants.some((p) => p.clientId === c.id)).map((c) => `<option value="${c.id}">${c.name}</option>`).join("")}</select>
-                <input id="arate" type="number" value="30" step="0.5" style="max-width:110px" />
+                <input id="arate" type="number" value="${((clients.filter((c) => !open.participants.some((p) => p.clientId === c.id))[0].defaultRate ?? 3000) / 100).toFixed(2)}" step="0.5" style="max-width:110px" />
                 <button class="pink" id="addp">Someone arrived</button></div>`
              : ""}
            <label>When two people overlap</label>
@@ -110,7 +110,8 @@ async function render() {
         : clients.length
           ? `<label>Who are you with?</label>
              <select id="who">${clients.map((c) => `<option value="${c.id}">${c.name}</option>`).join("")}</select>
-             <label>Rate $/hr (CAD)</label><input id="rate" type="number" value="30" step="0.5" />
+             <label>Rate $/hr (CAD)</label><input id="rate" type="number" value="${((clients[0].defaultRate ?? 3000) / 100).toFixed(2)}" step="0.5" />
+             <p class="sub">Their standing rate. Edit it under People to change it for good.</p>
              <button id="start" class="primary">Start shift</button>`
           : `<p class="empty">Add someone you support first.</p>`}
     </section>
@@ -120,14 +121,16 @@ async function render() {
       <table><tbody>
         ${clients.map((c) => ui.editing === c.id
           ? `<tr><td colspan="2"><div class="row"><input id="ren" value="${c.name}" />
+               <input id="rrate" type="number" step="0.5" style="max-width:120px" value="${((c.defaultRate ?? 3000) / 100).toFixed(2)}" title="Hourly rate" />
                <button class="tiny" data-save-client="${c.id}">Save</button>
-               <button class="tiny ghost" data-cancel="1">Cancel</button></div></td></tr>`
-          : `<tr><td>${c.name}</td><td class="n">
-               <button class="tiny ghost" data-edit="${c.id}">Rename</button>
+               <button class="tiny ghost" data-cancel="1">Cancel</button></div>
+               <p class="sub" style="margin:6px 0 0">Changing the rate only affects shifts you log from now on. Shifts already recorded keep the rate they were logged at.</p></td></tr>`
+          : `<tr><td>${c.name}<br><span class="sub">${money(c.defaultRate ?? 3000)}/hr</span></td><td class="n">
+               <button class="tiny ghost" data-edit="${c.id}">Edit</button>
                ${trash("client", c.id, c.name, "person")}</td></tr>`).join("")
           || `<tr><td class="empty">Nobody yet</td></tr>`}
       </tbody></table>
-      <div class="row"><input id="cname" placeholder="Name" /><button id="addc">Add</button></div>
+      <div class="row"><input id="cname" placeholder="Name" /><input id="crate" type="number" step="0.5" value="30.00" style="max-width:120px" title="Hourly rate" /><button id="addc">Add</button></div>
     </section>
 
     <section class="card">
@@ -271,7 +274,8 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
   all("[data-save-client]", (el) => el.onclick = () => go(async () => {
     const v = $("ren")!.value.trim();
     if (!v) return;
-    await emit("client", el.dataset.saveClient!, { name: v });
+    const rate = Math.round(parseFloat($("rrate")!.value || "0") * 100);
+    await emit("client", el.dataset.saveClient!, { name: v, defaultRate: rate });
     ui.editing = null;
   }));
 
@@ -308,10 +312,23 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     ui.msg = "Merged.";
   }));
 
+  // Picking a different person shows that person's standing rate.
+  const syncRate = (selId: string, rateId: string) => {
+    const sel = $(selId) as unknown as HTMLSelectElement | null;
+    if (!sel) return;
+    sel.onchange = () => {
+      const c = clients.find((x) => x.id === sel.value);
+      if (c) $(rateId)!.value = ((c.defaultRate ?? 3000) / 100).toFixed(2);
+    };
+  };
+  syncRate("who", "rate");
+  syncRate("arrive", "arate");
+
   if ($("addc")) $("addc")!.onclick = () => go(async () => {
     const v = $("cname")!.value.trim();
     if (!v) return;
-    await emit("client", newId(), { name: v, occurredAt: nowInstant(), recordedAt: nowInstant() });
+    const rate = Math.round(parseFloat($("crate")!.value || "30") * 100);
+    await emit("client", newId(), { name: v, defaultRate: rate, occurredAt: nowInstant(), recordedAt: nowInstant() });
   });
 
   if ($("start")) $("start")!.onclick = () => go(async () => {
