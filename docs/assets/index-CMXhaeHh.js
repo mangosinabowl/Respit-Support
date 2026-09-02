@@ -114,7 +114,7 @@ var e=Object.create,t=Object.defineProperty,n=Object.getOwnPropertyDescriptor,r=
         </select>`:``}
       </div>
     </section>
-    ${G.view.as===`me`?``:G.view.as===`calendar`?Wt(f,a,o,s,_):G.view.as===`archived`?Ut(r,i,a,g,_,o,u):G.view.clientId===`__all`?Gt(G.view.as,n,f,a,o,l):Kt(G.view.as,G.view.clientId||n[0]?.id||``,f,p,t,_,d,s,e,l)}
+    ${G.view.as===`me`?``:G.view.as===`calendar`?Wt(i.filter(e=>!e.archived),a,o,s,_):G.view.as===`archived`?Ut(r,i,a,g,_,o,u):G.view.clientId===`__all`?Gt(G.view.as,n,f,a,o,l):Kt(G.view.as,G.view.clientId||n[0]?.id||``,f,p,t,_,d,s,e,l)}
 
     ${G.view.as===`me`?`
     <div class="grid">

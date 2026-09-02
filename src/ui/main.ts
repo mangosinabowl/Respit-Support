@@ -261,7 +261,11 @@ async function render() {
       </div>
     </section>
     ${ui.view.as === "me" ? ""
-      : ui.view.as === "calendar" ? calendarSection(allShifts, allExpenses, allTrips, notes, name)
+      : ui.view.as === "calendar"
+        // Everything that happened, settled or not. The calendar is a record of
+        // when work was done, and a month emptying out as invoices are paid
+        // would erase the history it exists to show.
+        ? calendarSection(shiftsAll.filter((s) => !s.archived), allExpenses, allTrips, notes, name)
       : ui.view.as === "archived" ? archivedView(archived, shiftsAll, allExpenses, owed, name, allTrips, payments)
       : ui.view.clientId === "__all" ? everyoneView(ui.view.as, clients, allShifts, allExpenses, allTrips, adjustments)
       : shareView(ui.view.as, ui.view.clientId || clients[0]?.id || "", allShifts, expenses, everyone, name, trips, notes, store, adjustments)}
