@@ -52,6 +52,8 @@ export interface Client extends BaseRecord {
    * full hour regardless of who else was there.
    */
   defaultTimeRule?: TimeRule;
+  /** Reimbursed per unit distance, in cents. Snapshotted onto each trip. */
+  defaultMileageRate?: Money;
 
   displayInitial: string;
   colour: string;

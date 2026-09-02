@@ -4,11 +4,12 @@ import { makeEvent, type DomainEvent } from "../domain/events";
 import { live } from "../domain/replay";
 import { owedByPayer } from "../domain/queries";
 import { expenseAsMinutes, splitByPercent } from "../domain/expenseTime";
+import { tripClaim } from "../domain/mileage";
 import { syncOnce } from "../store/sync";
 import { connectDrive, driveRemote } from "../store/googleDrive";
 import { newId, nowInstant } from "../domain/primitives";
 import { splitShiftAt, mergeShifts } from "../domain/operations";
-import type { Shift, Expense, Client } from "../domain/entities";
+import type { Shift, Expense, Client, Trip } from "../domain/entities";
 
 const db = new RespiteDb();
 const dev = deviceId();
@@ -32,6 +33,8 @@ const ui = {
   expFor: {} as Record<string, number>,
   /** Kept across re-renders so ticking a person does not wipe what was typed. */
   draft: { desc: "", amt: "" },
+  tripFor: {} as Record<string, number>,
+  tripDraft: { km: "", purpose: "", rate: "" },
   sync: { token: null as string | null, busy: false, note: "" },
   view: { as: "me", clientId: "" } as { as: "me" | "guardian" | "payer" | "archived"; clientId: string },
   sort: { shifts: { key: "startAt", dir: -1 }, expenses: { key: "occurredAt", dir: -1 }, owed: { key: "unclaimed", dir: -1 } },
@@ -81,6 +84,8 @@ async function render() {
   const archived = everyone.filter((c) => c.archived);
   const shiftsAll = live(store, "shift") as unknown as Shift[];
   const allExpenses = live(store, "expense") as unknown as Expense[];
+  const allTrips = live(store, "trip") as unknown as Trip[];
+  const trips = allTrips.filter((t) => !t.archived && t.reimbursementStatus !== "paid");
   // Archived records and settled expenses drop out of the working views but
   // stay in every total, and stay restorable.
   const allShifts = shiftsAll.filter((s) => !s.archived);
@@ -232,21 +237,48 @@ async function render() {
     </section>
 
     <section class="card">
+      <h2>Mileage</h2>
+      ${clients.length ? `<div class="row">
+        <input id="tkm" type="number" step="0.1" placeholder="Distance" value="${ui.tripDraft.km}" style="max-width:120px" />
+        <select id="tunit" style="max-width:80px"><option value="km">km</option><option value="mi">mi</option></select>
+        <input id="tpurpose" placeholder="Where to?" value="${ui.tripDraft.purpose}" />
+        <input id="trate" type="number" step="0.01" placeholder="c/unit" value="${ui.tripDraft.rate}" style="max-width:110px" title="cents per km/mi" />
+      </div>
+      <p class="sub" style="margin:10px 0 4px">Who was in the car? Shares must add up to 100%.</p>
+      <table><tbody>${clients.map((c) => {
+        const on = ui.tripFor[c.id] !== undefined;
+        return `<tr><td style="width:26px"><input type="checkbox" data-tfor="${c.id}" ${on ? "checked" : ""} style="width:auto" /></td>
+          <td>${c.name}</td>
+          <td class="n" style="width:110px">${on ? `<input type="number" data-tpct="${c.id}" value="${ui.tripFor[c.id].toFixed(1)}" step="0.1" style="max-width:90px" />%` : `<span class="sub">not carried</span>`}</td>
+          <td class="n" style="width:90px"><span class="sub" id="tv-${c.id}"></span></td></tr>`;
+      }).join("")}</tbody></table>
+      <p class="sub" id="tpcttotal"></p>
+      <div class="row"><button id="addTrip">Log trip</button></div>
+      <p class="sub">Fuel at the pump is not claimed - mileage already covers running the car, so claiming both would bill the same cost twice.</p>
+      ${trips.length ? `<table style="margin-top:10px">
+        ${trips.map((t) => `<tr><td>${t.purpose || "Trip"}<br><span class="sub">${day(t.occurredAt)} · ${t.distance}${t.distanceUnit} · ${t.splits.map((sp) => `${name(sp.clientId)} ${money(sp.claimAmount)}`).join(" · ")}</span></td>
+          <td class="n">${money(t.splits.reduce((a, sp) => a + sp.claimAmount, 0))}</td>
+          <td class="n">${trash("trip", t.id, `${t.purpose || "Trip"} (${t.distance}${t.distanceUnit})`, "trip")}</td></tr>`).join("")}
+      </table>` : `<p class="empty">No trips yet.</p>`}` : `<p class="empty">Add someone you support first.</p>`}
+    </section>
+
+    <section class="card">
       <h2>Owed</h2>
       ${owed.length ? `<table>
         <tr><th data-sort="owed:payerPartyId">Payer ${arrow(ui.sort.owed, "payerPartyId")}</th>
             <th></th>
             <th class="n" data-sort="owed:unclaimed">Unclaimed ${arrow(ui.sort.owed, "unclaimed")}</th>
             <th class="n" data-sort="owed:submitted">Submitted ${arrow(ui.sort.owed, "submitted")}</th>
-            <th class="n" data-sort="owed:paid">Paid ${arrow(ui.sort.owed, "paid")}</th></tr>
+            <th class="n" data-sort="owed:paid">Paid ${arrow(ui.sort.owed, "paid")}</th><th></th></tr>
         ${sorted(owed, ui.sort.owed).map((r) => {
           const src = [["Time", r.time], ["Expenses", r.expenses], ["Mileage", r.mileage]] as const;
           return `<tr><td><b>${name(r.payerPartyId.replace(/^payer-/, ""))}</b></td>
               <td class="sub">total</td>
-              <td class="n"><b>${money(r.unclaimed)}</b></td><td class="n"><b>${money(r.submitted)}</b></td><td class="n"><b>${money(r.paid)}</b></td></tr>
+              <td class="n"><b>${money(r.unclaimed)}</b></td><td class="n"><b>${money(r.submitted)}</b></td><td class="n"><b>${money(r.paid)}</b></td>
+              <td class="n">${r.unclaimed ? `<button class="tiny ghost" data-submit="${r.payerPartyId}">Mark sent</button>` : ""}${r.submitted ? `<button class="tiny pink" data-settle="${r.payerPartyId}">Mark paid</button>` : ""}</td></tr>
             ${src.filter(([, t]) => t.unclaimed || t.submitted || t.paid).map(([label, t]) =>
               `<tr><td></td><td class="sub">${label}</td>
-                 <td class="n sub">${money(t.unclaimed)}</td><td class="n sub">${money(t.submitted)}</td><td class="n sub">${money(t.paid)}</td></tr>`).join("")}`;
+                 <td class="n sub">${money(t.unclaimed)}</td><td class="n sub">${money(t.submitted)}</td><td class="n sub">${money(t.paid)}</td><td></td></tr>`).join("")}`;
         }).join("")}
       </table>` : `<p class="empty">Nothing owed yet.</p>`}
     </section>
@@ -262,12 +294,14 @@ async function render() {
 
     <section class="card">
       <h2>Backup</h2>
-      <div class="row"><button id="exp" class="pink">Download log</button><label class="file">Restore<input id="imp" type="file" accept="application/json" hidden /></label></div>
+      <p class="sub">A copy you keep yourself, outside Google. Sync already keeps your devices in step — this is for if you lose the last one, or lose the Google account.</p>
+      <div class="row"><button id="exp" class="pink">Download a copy</button><label class="file">Merge a copy back in<input id="imp" type="file" accept="application/json" hidden /></label></div>
+      <p class="sub">Merging only <b>adds</b> what is missing. It never deletes anything, never overwrites newer work, and cannot undo changes made since the copy was taken. Importing the same file twice does nothing the second time.</p>
       <p class="msg">${ui.msg}</p>
     </section>`}
     ${confirmModal()}`;
 
-  wire(open, clients, done, expenses, allShifts, name);
+  wire(open, clients, done, expenses, allShifts, name, allExpenses, allTrips);
 }
 
 /**
@@ -427,7 +461,7 @@ function shiftDetail(s: Shift, expenses: Expense[], done: Shift[], name: (id: st
   </div>`;
 }
 
-function wire(open: Shift | undefined, clients: Client[], done: Shift[], expenses: Expense[], allShifts: Shift[], name: (id: string) => string) {
+function wire(open: Shift | undefined, clients: Client[], done: Shift[], expenses: Expense[], allShifts: Shift[], name: (id: string) => string, allExpenses: Expense[], allTrips: Trip[]) {
   const $ = (id: string) => document.getElementById(id) as HTMLInputElement | null;
   const go = async (fn: () => Promise<void>) => { try { await fn(); } catch (err: any) { ui.msg = err.message; } render(); };
   const all = (sel: string, fn: (el: HTMLElement) => void) => document.querySelectorAll<HTMLElement>(sel).forEach(fn);
@@ -759,6 +793,87 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
   if ($("edesc")) $("edesc")!.oninput = () => { ui.draft.desc = $("edesc")!.value; };
   preview();
 
+  const tripPreview = () => {
+    const km = parseFloat($("tkm")?.value || "0");
+    const rate = Math.round(parseFloat($("trate")?.value || "0") * 100) / 100;
+    const ids = Object.keys(ui.tripFor);
+    const el = document.getElementById("tpcttotal");
+    const total = ids.reduce((t, id) => t + ui.tripFor[id], 0);
+    if (el) {
+      const off = Math.abs(total - 100) > 0.05;
+      el.textContent = ids.length ? `${total.toFixed(1)}% allocated${off ? " — must be 100%" : ""}` : "";
+      el.style.color = off ? "var(--danger)" : "var(--muted)";
+    }
+    ids.forEach((id, i) => {
+      const out = document.getElementById(`tv-${id}`);
+      if (!out) return;
+      try {
+        out.textContent = km && rate ? money(tripClaim(km, Math.round(rate), ids.map((x) => ui.tripFor[x])).shares[i]) : "";
+      } catch { out.textContent = ""; }
+    });
+  };
+
+  all("[data-tfor]", (el) => (el as HTMLInputElement).onchange = () => {
+    const id = el.dataset.tfor!;
+    if (ui.tripFor[id] === undefined) ui.tripFor[id] = 0; else delete ui.tripFor[id];
+    const ids = Object.keys(ui.tripFor);
+    ids.forEach((x) => (ui.tripFor[x] = 100 / ids.length));
+    render();
+  });
+  all("[data-tpct]", (el) => (el as HTMLInputElement).oninput = () => {
+    ui.tripFor[el.dataset.tpct!] = parseFloat((el as HTMLInputElement).value || "0");
+    tripPreview();
+  });
+  ["tkm", "trate"].forEach((id) => { if ($(id)) $(id)!.oninput = () => { (ui.tripDraft as any)[id === "tkm" ? "km" : "rate"] = $(id)!.value; tripPreview(); }; });
+  if ($("tpurpose")) $("tpurpose")!.oninput = () => { ui.tripDraft.purpose = $("tpurpose")!.value; };
+  tripPreview();
+
+  if ($("addTrip")) $("addTrip")!.onclick = () => go(async () => {
+    const distance = parseFloat($("tkm")!.value || "0");
+    const rate = Math.round(parseFloat($("trate")!.value || "0"));
+    const ids = Object.keys(ui.tripFor);
+    if (!distance) throw new Error("Enter the distance.");
+    if (!rate) throw new Error("Enter the rate per km or mile, in cents.");
+    if (!ids.length) throw new Error("Choose who was in the car.");
+    const { shares } = tripClaim(distance, rate, ids.map((id) => ui.tripFor[id]));
+    await emit("trip", newId(), {
+      distance, distanceUnit: ($("tunit") as unknown as HTMLSelectElement).value,
+      purpose: $("tpurpose")!.value || "Trip", isClaimable: true,
+      occurredAt: nowInstant(), recordedAt: nowInstant(),
+      zone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      shiftId: open?.id ?? null, reimbursementStatus: "unclaimed", tags: [], customFields: {},
+      splits: ids.map((id, i) => ({
+        clientId: id, payerPartyId: `payer-${id}`,
+        distanceShare: ui.tripFor[id] / 100, rateApplied: rate, claimAmount: shares[i],
+      })),
+    });
+    ui.tripFor = {};
+    ui.tripDraft = { km: "", purpose: "", rate: "" };
+  });
+
+  /** Moves every unclaimed record for one payer to submitted, under one claim id. */
+  const restamp = async (payerPartyId: string, from: "unclaimed" | "submitted", to: "submitted" | "paid") => {
+    const submissionId = newId();
+    const touch = async (type: "shift" | "expense" | "trip", records: { id: string; reimbursementStatus: string }[], belongs: (r: any) => boolean) => {
+      for (const r of records) {
+        if (r.reimbursementStatus !== from || !belongs(r)) continue;
+        await emit(type, r.id, to === "submitted" ? { reimbursementStatus: to, submissionId } : { reimbursementStatus: to });
+      }
+    };
+    await touch("shift", allShifts as any, (s: Shift) => s.participants.some((p) => p.payerPartyId === payerPartyId));
+    await touch("expense", allExpenses as any, (e: Expense) => e.splits.some((sp) => sp.payerPartyId === payerPartyId));
+    await touch("trip", allTrips as any, (t: Trip) => t.splits.some((sp) => sp.payerPartyId === payerPartyId));
+  };
+
+  all("[data-submit]", (el) => el.onclick = () => go(async () => {
+    await restamp(el.dataset.submit!, "unclaimed", "submitted");
+    ui.msg = "Marked as sent. It stays visible under Submitted until it is paid.";
+  }));
+  all("[data-settle]", (el) => el.onclick = () => go(async () => {
+    await restamp(el.dataset.settle!, "submitted", "paid");
+    ui.msg = "Marked paid.";
+  }));
+
   if ($("syncNow")) $("syncNow")!.onclick = () => go(async () => {
     ui.sync.busy = true;
     ui.sync.note = "";
@@ -793,7 +908,7 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     const f = e.target.files?.[0];
     if (!f) return;
     const r = await importEventLog(db, await f.text());
-    ui.msg = `Restored ${r.imported}, already had ${r.skipped}${r.conflicts.length ? `, ${r.conflicts.length} kept back` : ""}.`;
+    ui.msg = `Added ${r.imported} missing, already had ${r.skipped}${r.conflicts.length ? `, ${r.conflicts.length} kept back as conflicts` : ""}. Nothing was removed.`;
   });
 }
 

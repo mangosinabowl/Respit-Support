@@ -471,3 +471,45 @@ describe("event log backup", () => {
     await b.close();
   });
 });
+
+describe("what importing a backup can and cannot do", () => {
+  it("never removes anything you already have", async () => {
+    const db2 = new RespiteDb(`imp-safe-${Math.random()}`); await db2.open();
+    await appendEvent(db2, makeEvent("client", "c1", { name: "Rory" }, "dev-a", 1));
+    const older = JSON.stringify({ events: [] }); // a backup taken before c1 existed
+    await importEventLog(db2, older);
+    // An empty or older file cannot take away work done since.
+    expect([...(await hydrate(db2)).client!.keys()]).toEqual(["c1"]);
+    await db2.close();
+  });
+
+  it("cannot resurrect something deleted after the backup was taken", async () => {
+    const db2 = new RespiteDb(`imp-res-${Math.random()}`); await db2.open();
+    const created = makeEvent("client", "c1", { name: "Rory" }, "dev-a", 1);
+    await appendEvent(db2, created);
+    const backup = await exportEventLog(db2); // taken while c1 was alive
+    await appendEvent(db2, makeEvent("client", "c1", { deleted: true }, "dev-a", 2));
+
+    await importEventLog(db2, backup);
+    // The deletion happened later, so it still wins. Importing an old file does
+    // not roll the app back to that moment.
+    expect((await hydrate(db2)).client!.get("c1")).toMatchObject({ deleted: true });
+    await db2.close();
+  });
+
+  it("adds only what is missing, so importing the same file twice is a no-op", async () => {
+    const a = new RespiteDb(`imp-a-${Math.random()}`); await a.open();
+    await appendEvent(a, makeEvent("client", "c1", { name: "Rory" }, "dev-a", 1));
+    const file = await exportEventLog(a);
+    const b = new RespiteDb(`imp-b-${Math.random()}`); await b.open();
+    await appendEvent(b, makeEvent("client", "c2", { name: "Andrew" }, "dev-b", 1));
+
+    const first = await importEventLog(b, file);
+    const again = await importEventLog(b, file);
+    expect(first.imported).toBe(1);
+    expect(again.imported).toBe(0);
+    // Its own record survived the import untouched.
+    expect([...(await hydrate(b)).client!.keys()].sort()).toEqual(["c1", "c2"]);
+    await a.close(); await b.close();
+  });
+});
