@@ -1831,6 +1831,20 @@ async function backfillRoles() {
   }
 }
 
+// Demonstration data, on request only. Never runs by itself.
+(window as unknown as Record<string, unknown>).respiteSeed = async () => {
+  const { seedDemoData } = await import("../dev/seed");
+  const n = await seedDemoData(db, dev);
+  location.reload();
+  return `${n} events loaded`;
+};
+(window as unknown as Record<string, unknown>).respiteWipe = async () => {
+  const { wipeAll } = await import("../dev/seed");
+  await wipeAll(db);
+  location.reload();
+  return "cleared";
+};
+
 db.open().then(async () => {
   await backfillRoles();
   await render();

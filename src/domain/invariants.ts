@@ -94,7 +94,9 @@ export function checkTrip(trip: Trip): Violation[] {
       continue;
     }
 
-    const expected = Math.ceil(s.distanceShare * s.rateApplied);
+    // Matches how the claim is worked out, to the last cent: a check that
+    // disagrees with the calculation would reject correct trips.
+    const expected = Math.ceil(Number((s.distanceShare * s.rateApplied).toPrecision(12)));
     if (s.claimAmount !== expected) {
       violations.push({
         code: "CLAIM_MISMATCH",

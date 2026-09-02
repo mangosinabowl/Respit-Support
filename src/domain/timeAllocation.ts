@@ -61,9 +61,11 @@ export function allocateTime(participants: Participant[]): TimeClaim[] {
         clientId: p.clientId,
         payerPartyId: p.payerPartyId,
         minutes,
-        // Up to the cent. A rate times an odd number of minutes lands on a
-        // fraction, and the worker should not lose it.
-        amount: Math.ceil((minutes / 60) * p.payRate),
+        // Multiply BEFORE dividing. minutes/60 is not representable in binary,
+        // so 31/60 * 3000 lands at 1550.0000000000002 and rounding up turns an
+        // exact $15.50 into $15.51 - overcharging on a figure the payer can
+        // recompute. minutes * payRate is exact integer arithmetic.
+        amount: Math.ceil((minutes * p.payRate) / 60),
       });
     }
   }
