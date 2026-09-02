@@ -1,2 +1,9 @@
 import { defineConfig } from "vite";
-export default defineConfig({ server: { port: 5173 } });
+
+// Served from https://<user>.github.io/Respit-Support/, so assets must be
+// requested relative to that subpath rather than the domain root.
+export default defineConfig({
+  base: "/Respit-Support/",
+  build: { outDir: "docs", emptyOutDir: true },
+  server: { port: 5173 },
+});
