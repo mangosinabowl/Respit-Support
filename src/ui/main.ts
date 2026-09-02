@@ -235,11 +235,15 @@ async function render() {
           <option value="payer"${ui.view.as === "payer" ? " selected" : ""}>Payer — expenses as extra time</option>
           <option value="archived"${ui.view.as === "archived" ? " selected" : ""}>Archived — put away, not gone</option>
         </select>
-        ${ui.view.as === "guardian" || ui.view.as === "payer" ? `<select id="viewWho">${clients.map((c) => `<option value="${c.id}"${ui.view.clientId === c.id ? " selected" : ""}>${c.name}</option>`).join("")}</select>` : ""}
+        ${ui.view.as === "guardian" || ui.view.as === "payer" ? `<select id="viewWho">
+          ${clients.map((c) => `<option value="${c.id}"${ui.view.clientId === c.id ? " selected" : ""}>${c.name}</option>`).join("")}
+          <option value="__all"${ui.view.clientId === "__all" ? " selected" : ""}>Everyone — one page each</option>
+        </select>` : ""}
       </div>
     </section>
     ${ui.view.as === "me" ? ""
       : ui.view.as === "archived" ? archivedView(archived, shiftsAll, allExpenses, owed, name, allTrips)
+      : ui.view.clientId === "__all" ? everyoneView(ui.view.as, clients, allShifts, allExpenses, allTrips, adjustments)
       : shareView(ui.view.as, ui.view.clientId || clients[0]?.id || "", allShifts, expenses, everyone, name, trips, notes, store, adjustments)}
 
     ${ui.view.as !== "me" ? "" : `
@@ -499,6 +503,58 @@ function archivedView(people: Client[], shifts: Shift[], expenses: Expense[], ow
   ${nothing ? `<section class="card"><p class="sub">Nothing has been archived. Archiving puts things away without deleting them — you can bring anything back from here.</p></section>` : ""}`;
 }
 
+/**
+ * Everyone at once: one block per person, each still its own invoice, which is
+ * what prints as one page each. Anyone owed nothing is left out - a page
+ * reading zero is noise on an invoice run.
+ */
+function everyoneView(as: "guardian" | "payer", clients: Client[], shifts: Shift[], expenses: Expense[], trips: Trip[], adjustments: Adjustment[]) {
+  const all = clients.map((c) => ({
+    client: c,
+    inv: buildInvoice(`payer-${c.id}`, c.id, c.name, shifts.filter((s) => s.endAt), expenses, trips, adjustments),
+  }));
+  const billable = all.filter((r) => r.inv.total !== 0);
+
+  const block = ({ client, inv }: (typeof all)[number]) => {
+    const rate = client.defaultRate ?? 0;
+    const outlay = inv.expenses + inv.mileage;
+    if (!inv.total) {
+      return `<h3 style="margin-top:16px">${client.name}</h3><p class="empty">Nothing owed.</p>`;
+    }
+    return `<h3 style="margin-top:16px">${client.name} — ${money(inv.total)}</h3>
+      <table>
+        <tr><th>When</th><th>What</th><th class="n">Amount</th></tr>
+        ${inv.lines.map((l) => `<tr><td>${day(l.when)}</td>
+          <td>${l.detail}${l.quantity ? `<br><span class="sub">${l.quantity}</span>` : ""}</td>
+          <td class="n">${money(l.amount)}</td></tr>`).join("")}
+        <tr><td></td><td class="sub">Time</td><td class="n sub">${money(inv.time)}</td></tr>
+        <tr><td></td><td class="sub">Expenses</td><td class="n sub">${money(inv.expenses)}</td></tr>
+        <tr><td></td><td class="sub">Mileage</td><td class="n sub">${money(inv.mileage)}</td></tr>
+        ${inv.adjustments ? `<tr><td></td><td class="sub">Adjustments</td><td class="n sub">${money(inv.adjustments)}</td></tr>` : ""}
+        <tr><td></td><td><b>Total</b></td><td class="n"><b>${money(inv.total)}</b></td></tr>
+      </table>
+      ${as === "payer" && outlay ? `<p class="sub">Expenses and mileage: ${money(outlay)}${rate > 0
+        ? ` — or +${dur(expenseAsMinutes(outlay, rate))} at ${money(rate)}/hr.`
+        : " — no hourly rate set, so there is no time equivalent."}</p>` : ""}`;
+  };
+
+  return `<section class="card">
+    <h2>Everyone</h2>
+    <p class="sub">Every person and what makes up their claim. ${billable.length
+      ? `${billable.length} to invoice, one page each when printed — anyone owed nothing is left out of the printing.`
+      : "Nobody is owed anything yet."}</p>
+    ${all.map(block).join("")}
+    ${billable.length ? `<div class="acts" style="margin-top:16px">
+      <button class="tiny" data-print="all">Print all — one page each</button>
+      <button class="tiny ghost" data-print="alldraft">Draft of all, with notes</button>
+    </div>
+    <div class="grid" style="margin-top:12px">
+      <div class="stat"><b>${money(billable.reduce((t, r) => t + r.inv.total, 0))}</b><span>owed altogether</span></div>
+      <div class="stat"><b>${billable.length}</b><span>invoices</span></div>
+    </div>` : ""}
+  </section>`;
+}
+
 function shareView(as: "guardian" | "payer", clientId: string, shifts: Shift[], expenses: Expense[], clients: Client[], name: (id: string) => string, trips: Trip[], notes: Note[], store: ReturnType<typeof replay>, adjustments: Adjustment[]) {
   const who = clients.find((c) => c.id === clientId);
   if (!who) return `<section class="card"><p class="empty">Add someone first.</p></section>`;
@@ -576,7 +632,6 @@ function shareView(as: "guardian" | "payer", clientId: string, shifts: Shift[], 
 
     ${as === "payer" ? `<div class="acts" style="margin-top:14px">
       <button class="tiny" data-print="one">Invoice for ${who.name}</button>
-      <button class="tiny ghost" data-print="all">Every person, one page each</button>
       <button class="tiny ghost" data-print="draft">Draft with notes</button>
     </div>
 
@@ -602,8 +657,9 @@ function shareView(as: "guardian" | "payer", clientId: string, shifts: Shift[], 
       ${as === "payer"
         ? `<div class="stat"><b>${dur(totalWorked)}</b><span>time with ${who.name}</span></div>
            <div class="stat two-ways"><b>${money(outlay)}</b><span>expenses and mileage</span>
-             <em>or</em>
-             <b>+${dur(outlayAsTime)}</b><span>at ${money(rate)}/hr</span></div>
+             ${rate > 0
+               ? `<em>or</em><b>+${dur(outlayAsTime)}</b><span>at ${money(rate)}/hr</span>`
+               : `<span class="sub" style="margin-top:4px">no hourly rate set, so no time equivalent</span>`}</div>
            <div class="stat"><b>${money(invoice.total)}</b><span>total owed</span></div>`
         : `<div class="stat"><b>${dur(totalWorked)}</b><span>time</span></div>
            <div class="stat"><b>${money(invoice.time)}</b><span>support</span></div>
@@ -1231,12 +1287,12 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
   all("[data-print]", (el) => el.onclick = () => go(async () => {
     const mode = el.dataset.print!;
     const who = ui.view.clientId || clients[0]?.id || "";
-    if (mode === "all") {
+    if (mode === "all" || mode === "alldraft") {
       // Everyone who is actually owed something: a page reading zero helps
       // nobody and makes the file harder to read.
       const invoices = clients.map((c) => invoiceFor(c.id)).filter((i) => i.total !== 0);
       if (!invoices.length) throw new Error("Nothing to invoice yet.");
-      printInvoices(invoices, false);
+      printInvoices(invoices, mode === "alldraft");
     } else {
       const inv = invoiceFor(who);
       if (!inv.total && mode !== "draft") throw new Error("Nothing to invoice for this person yet.");
