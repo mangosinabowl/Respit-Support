@@ -83,6 +83,8 @@ export interface Participant {
 }
 
 export interface Shift extends BaseRecord {
+  /** Set when this was pulled back off an invoice that was not paid in full. */
+  rejected?: ClaimHistory;
   startAt: ISOInstant;
   /** Null while a timer is running. */
   endAt?: ISOInstant | null;
@@ -99,6 +101,8 @@ export interface MoneySplit {
 }
 
 export interface Expense extends BaseRecord {
+  /** Set when this was pulled back off an invoice that was not paid in full. */
+  rejected?: ClaimHistory;
   totalAmount: Money;
   category: ExpenseCategory;
   description: string;
@@ -119,6 +123,8 @@ export interface TripSplit {
 }
 
 export interface Trip extends BaseRecord {
+  /** Set when this was pulled back off an invoice that was not paid in full. */
+  rejected?: ClaimHistory;
   distance: number;
   distanceUnit: "mi" | "km";
   purpose: string;
@@ -195,10 +201,22 @@ export interface Adjustment extends BaseRecord {
  * that is exactly what gets asked about.
  */
 export interface Submission extends BaseRecord {
+  /**
+   * An invoice, or a redaction against one. A payer who pays part of an invoice
+   * does not change what was claimed, so the original is never edited: the
+   * amount that came back is recorded against it instead. The pair reads as
+   * what was claimed, what was pulled back, and what was actually paid.
+   */
+  kind?: "invoice" | "redaction";
+  /** For a redaction, the invoice it subtracts from. */
+  redactsId?: Id;
   payerPartyId: Id;
   clientId: Id;
   clientName: string;
-  paidAt: ISOInstant;
+  /** When it went to the payer. An invoice exists once it is sent. */
+  issuedAt?: ISOInstant;
+  /** When the money arrived. Absent while it is still outstanding. */
+  paidAt?: ISOInstant;
   amount: Money;
   time: Money;
   expenses: Money;
@@ -207,6 +225,20 @@ export interface Submission extends BaseRecord {
   /** What it settled, so it can all be reopened together if a payment bounces. */
   covers: { shifts: Id[]; expenses: Id[]; trips: Id[] };
   note?: string;
+}
+
+/**
+ * Where a record has already been claimed and refused.
+ *
+ * Carried on the shift, expense or trip itself so it travels with the thing:
+ * months later the question is "why is this still unpaid", and the answer has
+ * to be attached to the item, not buried in an invoice it is no longer on.
+ */
+export interface ClaimHistory {
+  /** The invoice it was refused off. */
+  fromSubmissionId: Id;
+  reopenedAt: ISOInstant;
+  reason?: string;
 }
 
 export interface Tag extends BaseRecord {

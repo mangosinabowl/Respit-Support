@@ -5,6 +5,7 @@ import { live, type replay } from "../domain/replay";
 import { owedByPayer } from "../domain/queries";
 import { clientsVisibleTo, filterShiftFor, filterExpenseFor, type AudienceContext } from "../domain/audience";
 import { buildInvoice, type Invoice } from "../domain/invoice";
+import { allocateTime } from "../domain/timeAllocation";
 import { printInvoices } from "./invoicePrint";
 import { renderCalendar, tallyByDay, GRAINS, spanFor, type Grain } from "./calendarView";
 import { step, todayKey, dayKey } from "../domain/calendar";
@@ -342,7 +343,9 @@ async function render() {
             <th class="n" data-sort="shifts:pay">Pay ${arrow(ui.sort.shifts, "pay")}</th></tr>
         ${shiftRows.map((r) => `<tr class="click ${ui.openShift === r.id ? "open" : ""}" data-shift="${r.id}">
             <td>${day(r.startAt)} ${hhmm(r.startAt)}\u2013${hhmm(r.endAt)}</td>
-            <td>${r.people}${problems(checkShift(allShifts.find((s) => s.id === r.id)!))}</td>
+            <td>${r.people}${(() => { const sh = allShifts.find((s) => s.id === r.id)!; return sh.rejected
+              ? `<span class="pill warn" title="${sh.rejected.reason ?? "Not paid"}">came back off an invoice</span>` : ""; })()}
+              ${problems(checkShift(allShifts.find((s) => s.id === r.id)!))}</td>
             <td class="n">${dur(r.minutes)}</td><td class="n">${money(r.pay)}</td></tr>`).join("")}
       </table>` : `<p class="empty">No finished shifts yet.</p>`}
       ${ui.openShift ? shiftDetail(allShifts.find((s) => s.id === ui.openShift)!, expenses, done, name, clients, notes) : ""}
@@ -379,6 +382,8 @@ async function render() {
                      <button class="tiny ghost" data-unshot="${ex.id}:${a.id}">Remove</button></span>`).join("")}
                    <label class="file tiny">${shots.length ? "Add another" : "Add receipt"}<input type="file" accept="image/*" capture="environment" data-shot="${ex.id}" hidden /></label></div>`;
                })()}
+               ${(() => { const ex = expenses.find((x) => x.id === e.id)!; return ex.rejected
+                 ? `<span class="pill warn" title="${ex.rejected.reason ?? "Not paid"}">came back off an invoice</span>` : ""; })()}
                ${problems(checkExpense(expenses.find((x) => x.id === e.id)!))}</td>
              <td>${day(e.occurredAt)}</td><td class="n">${money(e.totalAmount)}</td>
              <td class="n"><button class="tiny ghost" data-edit="${e.id}">Edit</button>
@@ -418,7 +423,8 @@ async function render() {
       <div class="row"><button id="addTrip">Log trip</button></div>
       <p class="sub">Fuel at the pump is not claimed - mileage already covers running the car, so claiming both would bill the same cost twice.</p>
       ${trips.length ? `<table style="margin-top:10px">
-        ${trips.map((t) => `<tr><td>${t.purpose || "Trip"}<br><span class="sub">${day(t.occurredAt)} · ${t.distance}${t.distanceUnit} · ${t.splits.map((sp) => `${name(sp.clientId)} ${money(sp.claimAmount)}`).join(" · ")}</span>${problems(checkTrip(t))}</td>
+        ${trips.map((t) => `<tr><td>${t.purpose || "Trip"}<br><span class="sub">${day(t.occurredAt)} · ${t.distance}${t.distanceUnit} · ${t.splits.map((sp) => `${name(sp.clientId)} ${money(sp.claimAmount)}`).join(" · ")}</span>
+          ${t.rejected ? `<span class="pill warn" title="${t.rejected.reason ?? "Not paid"}">came back off an invoice</span>` : ""}${problems(checkTrip(t))}</td>
           <td class="n">${money(t.splits.reduce((a, sp) => a + sp.claimAmount, 0))}</td>
           <td class="n">${trash("trip", t.id, `${t.purpose || "Trip"} (${t.distance}${t.distanceUnit})`, "trip")}</td></tr>`).join("")}
       </table>` : `<p class="empty">No trips yet.</p>`}` : `<p class="empty">Add someone you support first.</p>`}
@@ -509,12 +515,16 @@ function archivedView(people: Client[], shifts: Shift[], expenses: Expense[], ow
   </section>
 
   <section class="card view-archived">
-    <h2>Invoices paid</h2>
-    <p class="sub">Every payment received: when it came in, who paid it, who it was for, and what it was made up of.</p>
-    ${payments.length ? `<table>
+    <h2>Invoices</h2>
+    <p class="sub">Every invoice sent: what was claimed, anything taken back off it, and what was actually paid.</p>
+    ${payments.filter((p) => p.kind !== "redaction").length ? `<table>
       <tr><th>Paid</th><th>From</th><th>For</th><th>What it covered</th><th class="n">Amount</th><th></th></tr>
-      ${[...payments].sort((a, b) => b.paidAt.localeCompare(a.paidAt)).map((p) => `<tr>
-        <td>${day(p.paidAt)}<br><span class="sub">${hhmm(p.paidAt)}</span></td>
+      ${[...payments].filter((p) => p.kind !== "redaction").sort((a, b) => (b.paidAt ?? b.issuedAt ?? "").localeCompare(a.paidAt ?? a.issuedAt ?? "")).map((p) => {
+        const cuts = payments.filter((r) => r.kind === "redaction" && r.redactsId === p.id);
+        const net = p.amount + cuts.reduce((t, r) => t + r.amount, 0);
+        return `<tr>
+        <td>${p.paidAt ? `${day(p.paidAt)}<br><span class="sub">paid ${hhmm(p.paidAt)}</span>`
+          : `${day(p.issuedAt ?? p.occurredAt)}<br><span class="sub">sent, awaiting payment</span>`}</td>
         <td>${p.clientName}<br><span class="sub">payer</span></td>
         <td>${p.clientName}</td>
         <td><span class="sub">
@@ -525,11 +535,22 @@ function archivedView(people: Client[], shifts: Shift[], expenses: Expense[], ow
         </span></td>
         <td class="n"><b>${money(p.amount)}</b></td>
         <td class="n"><button class="tiny pink" data-reopen-invoice="${p.id}">Reopen</button></td>
+      </tr>
+      ${cuts.map((r) => `<tr class="redaction">
+        <td>${day(r.paidAt ?? r.occurredAt)}</td>
+        <td colspan="3"><span class="sub">taken back — ${r.note ?? "not paid"}<br>
+          ${r.covers.shifts.length + r.covers.expenses.length + r.covers.trips.length} item(s), still claimable elsewhere</span></td>
+        <td class="n">${money(r.amount)}</td><td></td>
       </tr>`).join("")}
+      ${cuts.length ? `<tr class="net"><td></td><td colspan="3"><b>Actually paid on this invoice</b></td>
+        <td class="n"><b>${money(net)}</b></td><td></td></tr>` : ""}`;
+      }).join("")}
     </table>
     <div class="grid" style="margin-top:12px">
-      <div class="stat"><b>${money(payments.reduce((t, p) => t + p.amount, 0))}</b><span>received in total</span></div>
-      <div class="stat"><b>${payments.length}</b><span>invoice${payments.length === 1 ? "" : "s"} paid</span></div>
+      <div class="stat"><b>${money(payments.filter((p) => p.paidAt && p.kind !== "redaction").reduce((t, p) => t + p.amount, 0)
+        + payments.filter((p) => p.kind === "redaction").reduce((t, p) => t + p.amount, 0))}</b><span>received in total</span></div>
+      <div class="stat"><b>${payments.filter((p) => p.paidAt && p.kind !== "redaction").length}</b><span>paid</span></div>
+      <div class="stat"><b>${payments.filter((p) => !p.paidAt && p.kind !== "redaction").length}</b><span>awaiting payment</span></div>
     </div>`
       : `<p class="empty">Nothing paid yet.</p>`}
   </section>
@@ -597,7 +618,11 @@ function everyoneView(as: "guardian" | "payer", clients: Client[], shifts: Shift
         <tr><th>When</th><th>What</th><th class="n">Amount</th></tr>
         ${inv.lines.map((l) => `<tr><td>${day(l.when)}</td>
           <td>${l.detail}${l.quantity ? `<br><span class="sub">${l.quantity}</span>` : ""}${
-        l.status === "submitted" ? `<span class="pill warn" title="Already sent to the payer and not yet paid">sent, unpaid</span>` : ""}</td>
+        l.status === "submitted" ? `<span class="pill warn" title="Already sent to the payer and not yet paid">sent, unpaid</span>` : ""}${
+        (() => {
+          const rec = [...shifts, ...expenses, ...trips].find((r: any) => r.id === l.sourceId) as any;
+          return rec?.rejected ? `<span class="pill warn" title="${rec.rejected.reason ?? "Not paid"}">refused before</span>` : "";
+        })()}</td>
           <td class="n">${money(l.amount)}</td></tr>`).join("")}
         ${inv.time && as !== "payer" ? `<tr><td></td><td class="sub">Time</td><td class="n sub">${money(inv.time)}</td></tr>` : ""}
         ${as === "payer"
@@ -690,7 +715,11 @@ function shareView(as: "guardian" | "payer", clientId: string, shifts: Shift[], 
       ${as === "payer" ? `<td style="width:26px"><input type="checkbox" data-pick="${l.sourceId}" checked style="width:auto" title="Leave this off the invoice" /></td>` : ""}
       <td>${day(l.when)}</td>
       <td>${l.detail}${l.quantity ? `<br><span class="sub">${l.quantity}</span>` : ""}${
-        l.status === "submitted" ? `<span class="pill warn" title="Already sent to the payer and not yet paid">sent, unpaid</span>` : ""}</td>
+        l.status === "submitted" ? `<span class="pill warn" title="Already sent to the payer and not yet paid">sent, unpaid</span>` : ""}${
+        (() => {
+          const rec = [...shifts, ...expenses, ...trips].find((r: any) => r.id === l.sourceId) as any;
+          return rec?.rejected ? `<span class="pill warn" title="${rec.rejected.reason ?? "Not paid"}">refused before</span>` : "";
+        })()}</td>
       <td class="n">${money(l.amount)}</td>
     </tr>`).join("");
 
@@ -772,7 +801,8 @@ function shareView(as: "guardian" | "payer", clientId: string, shifts: Shift[], 
         ? `<button class="tiny" data-submit="payer-${clientId}">Mark this invoice sent</button>` : ""}
       <button class="tiny pink" data-mark-paid="payer-${clientId}">Mark this invoice paid</button>
       ${invoice.lines.some((l) => l.status === "submitted")
-        ? `<button class="tiny ghost" data-unsend="payer-${clientId}">Bring the unpaid ones back</button>` : ""}
+        ? `<input id="unsendWhy" placeholder="Why were these not paid?" style="max-width:260px" />
+           <button class="tiny ghost" data-unsend="payer-${clientId}">Bring the unpaid ones back</button>` : ""}
     </div>
     ${invoice.lines.some((l) => l.status === "submitted")
       ? `<p class="sub">Lines marked <b>sent, unpaid</b> went out on an earlier invoice and were never paid. They stay claimable and appear here until they are, so they can go on this invoice too — or bring them back to unclaimed to start again.</p>` : ""}` : ""}` : ""}
@@ -1082,9 +1112,14 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     // written against records that already read as paid and cover nothing.
     const inv = invoiceFor(clientId);
     const open = (st: string) => st === "unclaimed" || st === "submitted";
-    await emit("submission", newId(), {
-      payerPartyId: payer, clientId, clientName: inv.clientName,
-      paidAt: nowInstant(), amount: inv.total,
+    // If this was already sent, settle THAT invoice rather than writing a second
+    // one: two records for one claim is how a total gets counted twice.
+    const already = payments.find((p) => p.kind !== "redaction" && p.payerPartyId === payer && !p.paidAt);
+    if (already) {
+      await emit("submission", already.id, { paidAt: nowInstant() });
+    } else await emit("submission", newId(), {
+      kind: "invoice", payerPartyId: payer, clientId, clientName: inv.clientName,
+      issuedAt: nowInstant(), paidAt: nowInstant(), amount: inv.total,
       time: inv.time, expenses: inv.expenses, mileage: inv.mileage, adjustments: inv.adjustments,
       // Only what was actually on the invoice: anything left off is still owed
       // and must not be marked paid alongside it.
@@ -1402,6 +1437,10 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
   });
 
   /** Moves every record for one payer from one status to the next, under one claim id. */
+  /** What one payer's share of a shift comes to, for recording a subtraction. */
+  const allocateTimeAmount = (s: Shift, payer: string) =>
+    allocateTime(s.participants).filter((c) => c.payerPartyId === payer).reduce((a, c) => a + c.amount, 0);
+
   const onInvoice = <T extends { id: string; occurredAt: string }>(rows: T[]) => rows.filter((r) => {
     if (ui.pick.left_out[r.id]) return false;
     const d = dayKey(r.occurredAt);
@@ -1410,8 +1449,7 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     return true;
   });
 
-  const restamp = async (payerPartyId: string, from: "unclaimed" | "submitted", to: "submitted" | "paid") => {
-    const submissionId = newId();
+  const restamp = async (payerPartyId: string, from: "unclaimed" | "submitted", to: "submitted" | "paid", submissionId = newId()) => {
     const touch = async (type: "shift" | "expense" | "trip", records: { id: string; reimbursementStatus: string }[], belongs: (r: any) => boolean) => {
       for (const r of records) {
         if (r.reimbursementStatus !== from || !belongs(r)) continue;
@@ -1425,6 +1463,7 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
 
   all("[data-submit]", (el) => el.onclick = () => go(async () => {
     const payer = el.dataset.submit!;
+    const clientId = payer.replace(/^payer-/, "");
     // Refuse to send a claim built on records that fail their own checks: the
     // payer would query it, and by then it has your name on it.
     const bad = [
@@ -1435,8 +1474,27 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     if (!isSubmittable(bad)) {
       throw new Error(`Not ready to send: ${bad.map((v) => v.message).join("; ")}`);
     }
-    await restamp(payer, "unclaimed", "submitted");
-    ui.msg = "Marked as sent. It stays visible under Submitted until it is paid.";
+    // The invoice record is written here, not on payment: an invoice exists as
+    // soon as it goes out, and anything later pulled back off it needs
+    // something to point at.
+    const inv = invoiceFor(clientId);
+    const at = nowInstant();
+    const submissionId = newId();
+    const openNow = (st: string) => st === "unclaimed";
+    await emit("submission", submissionId, {
+      kind: "invoice", payerPartyId: payer, clientId, clientName: inv.clientName,
+      issuedAt: at, amount: inv.total,
+      time: inv.time, expenses: inv.expenses, mileage: inv.mileage, adjustments: inv.adjustments,
+      covers: {
+        shifts: onInvoice(allShifts).filter((x) => openNow(x.reimbursementStatus) && x.participants.some((p) => p.payerPartyId === payer)).map((x) => x.id),
+        expenses: onInvoice(allExpenses).filter((x) => openNow(x.reimbursementStatus) && x.splits.some((sp) => sp.payerPartyId === payer)).map((x) => x.id),
+        trips: onInvoice(allTrips).filter((x) => openNow(x.reimbursementStatus) && x.splits.some((sp) => sp.payerPartyId === payer)).map((x) => x.id),
+      },
+      occurredAt: at, recordedAt: at,
+      zone: Intl.DateTimeFormat().resolvedOptions().timeZone, tags: [], customFields: {},
+    });
+    await restamp(payer, "unclaimed", "submitted", submissionId);
+    ui.msg = "Invoice sent. It stays under Submitted until the money arrives.";
   }));
   all("[data-settle]", (el) => el.onclick = () => go(async () => {
     await restamp(el.dataset.settle!, "submitted", "paid");
@@ -1528,20 +1586,63 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
   }));
 
   all("[data-unsend]", (el) => el.onclick = () => go(async () => {
-    // Sent but never paid: put it back to unclaimed so it can be invoiced
-    // afresh, without pretending it was never claimed in the first place.
     const payer = el.dataset.unsend!;
-    let n = 0;
-    for (const s of onInvoice(allShifts)) {
-      if (s.reimbursementStatus === "submitted" && s.participants.some((p) => p.payerPartyId === payer)) { await emit("shift", s.id, { reimbursementStatus: "unclaimed" }); n += 1; }
+    const reason = ($("unsendWhy") as HTMLInputElement | null)?.value.trim() || "";
+    const at = nowInstant();
+
+    // Gather what is being pulled back, and off which invoice, before anything
+    // changes: after restamping there is nothing left to point at.
+    const back: { type: "shift" | "expense" | "trip"; id: string; from?: string; amount: number }[] = [];
+    for (const x of onInvoice(allShifts)) {
+      if (x.reimbursementStatus !== "submitted" || !x.participants.some((p) => p.payerPartyId === payer)) continue;
+      back.push({ type: "shift", id: x.id, from: x.submissionId, amount: allocateTimeAmount(x, payer) });
     }
     for (const x of onInvoice(allExpenses)) {
-      if (x.reimbursementStatus === "submitted" && x.splits.some((sp) => sp.payerPartyId === payer)) { await emit("expense", x.id, { reimbursementStatus: "unclaimed" }); n += 1; }
+      if (x.reimbursementStatus !== "submitted" || !x.splits.some((sp) => sp.payerPartyId === payer)) continue;
+      back.push({ type: "expense", id: x.id, from: x.submissionId, amount: x.splits.filter((sp) => sp.payerPartyId === payer).reduce((a, sp) => a + sp.amount, 0) });
     }
-    for (const t of onInvoice(allTrips)) {
-      if (t.reimbursementStatus === "submitted" && t.splits.some((sp) => sp.payerPartyId === payer)) { await emit("trip", t.id, { reimbursementStatus: "unclaimed" }); n += 1; }
+    for (const x of onInvoice(allTrips)) {
+      if (x.reimbursementStatus !== "submitted" || !x.splits.some((sp) => sp.payerPartyId === payer)) continue;
+      back.push({ type: "trip", id: x.id, from: x.submissionId, amount: x.splits.filter((sp) => sp.payerPartyId === payer).reduce((a, sp) => a + sp.claimAmount, 0) });
     }
-    ui.msg = `${n} item${n === 1 ? "" : "s"} brought back to unclaimed. They can go on a new invoice.`;
+    if (!back.length) throw new Error("Nothing sent and unpaid to bring back.");
+
+    // One redaction per invoice they came off, so each original keeps its own
+    // record of what was subtracted from it.
+    const byInvoice = new Map<string, typeof back>();
+    for (const b of back) {
+      const key = b.from ?? "none";
+      if (!byInvoice.has(key)) byInvoice.set(key, []);
+      byInvoice.get(key)!.push(b);
+    }
+    const clientId = payer.replace(/^payer-/, "");
+    for (const [invoiceId, items] of byInvoice) {
+      const total = items.reduce((t, i) => t + i.amount, 0);
+      await emit("submission", newId(), {
+        kind: "redaction",
+        redactsId: invoiceId === "none" ? undefined : invoiceId,
+        payerPartyId: payer, clientId,
+        clientName: everyoneList.find((c) => c.id === clientId)?.name ?? "Unknown",
+        paidAt: at, amount: -total, time: 0, expenses: 0, mileage: 0, adjustments: 0,
+        covers: {
+          shifts: items.filter((i) => i.type === "shift").map((i) => i.id),
+          expenses: items.filter((i) => i.type === "expense").map((i) => i.id),
+          trips: items.filter((i) => i.type === "trip").map((i) => i.id),
+        },
+        note: reason || "Pulled back off the invoice, not paid.",
+        occurredAt: at, recordedAt: at,
+        zone: Intl.DateTimeFormat().resolvedOptions().timeZone, tags: [], customFields: {},
+      });
+    }
+
+    // Tag each item with where it was refused from, so it carries its own story.
+    for (const b of back) {
+      await emit(b.type, b.id, {
+        reimbursementStatus: "unclaimed",
+        rejected: { fromSubmissionId: b.from ?? "", reopenedAt: at, reason: reason || undefined },
+      });
+    }
+    ui.msg = `${back.length} item${back.length === 1 ? "" : "s"} brought back and tagged. The invoice they came off now shows what was subtracted.`;
   }));
 
   all("[data-mark-paid]", (el) => el.onclick = (e) => {
