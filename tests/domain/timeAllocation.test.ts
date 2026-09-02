@@ -45,7 +45,32 @@ describe("allocateTime", () => {
       p("c2", T(15), T(17), "splitEvenly"),
     ]);
     expect(claims.find((c) => c.clientId === "c1")!.minutes).toBe(120);
+    // The lone splitter owes the whole stretch: there is no other splitter to
+    // share it with. A full payer in the room does not reduce their bill.
+    expect(claims.find((c) => c.clientId === "c2")!.minutes).toBe(120);
+  });
+
+  it("splits only among the splitters, ignoring full payers in the divisor", () => {
+    const claims = allocateTime([
+      p("c1", T(15), T(17), "fullPerPayer"),
+      p("c2", T(15), T(17), "splitEvenly"),
+      p("c3", T(15), T(17), "splitEvenly"),
+    ]);
+    expect(claims.find((c) => c.clientId === "c1")!.minutes).toBe(120);
+    // Two splitters halve it between themselves. Were the full payer counted in
+    // the divisor they would get 40 minutes each instead of 60.
     expect(claims.find((c) => c.clientId === "c2")!.minutes).toBe(60);
+    expect(claims.find((c) => c.clientId === "c3")!.minutes).toBe(60);
+  });
+
+  it("a splitter arriving partway shares only the stretch they were there for", () => {
+    const claims = allocateTime([
+      p("c1", T(15), T(17), "splitEvenly"),
+      p("c2", T(16), T(17), "splitEvenly"),
+    ]);
+    // 15-16 alone: 60 to c1. 16-17 shared: 30 each.
+    expect(claims.find((c) => c.clientId === "c1")!.minutes).toBe(90);
+    expect(claims.find((c) => c.clientId === "c2")!.minutes).toBe(30);
   });
 
   it("uses each participant's own snapshotted rate", () => {

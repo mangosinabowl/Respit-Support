@@ -47,7 +47,7 @@ function sorted<T>(rows: T[], s: { key: string; dir: number }): T[] {
 }
 const RULE_LABEL: Record<string, string> = {
   fullPerPayer: "pays the full hour",
-  splitEvenly: "splits the hour",
+  splitEvenly: "splits with other splitters",
 };
 const ruleSelect = (id: string, value: string) =>
   `<select id="${id}" style="max-width:200px"${id.startsWith("rule-") ? ` data-rule="${id}"` : ""}>
@@ -110,7 +110,7 @@ async function render() {
                 <input id="arate" type="number" value="${((clients.filter((c) => !open.participants.some((p) => p.clientId === c.id))[0].defaultRate ?? 3000) / 100).toFixed(2)}" step="0.5" style="max-width:110px" />
                 <button class="pink" id="addp">Someone arrived</button></div>`
              : ""}
-           <p class="sub">Each person settles their own way. An hour is shared only among those set to split it.</p>
+           <p class="sub">Each person settles their own way. Time is shared only between the people set to split — anyone on the full hour is not counted in that split.</p>
            <div class="acts"><button id="end" class="primary">End shift</button>
            ${trash("shift", open.id, `the shift running since ${hhmm(open.startAt)}`, "shift")}</div>`
         : clients.length
