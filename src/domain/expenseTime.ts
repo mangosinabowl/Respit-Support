@@ -1,3 +1,4 @@
+import { allocateByWeights } from "./allocation";
 import type { Money } from "./primitives";
 
 /**
@@ -19,29 +20,20 @@ export function expenseAsMinutes(share: Money, ratePerHour: Money): number {
 /**
  * Divides an amount by percentage shares that must total 100.
  *
- * Every cent is accounted for: the largest remainders receive the leftover
- * cents one at a time, so the parts always sum back to the original exactly.
- * Splitting a receipt must never invent or lose money.
+ * The apportionment itself is allocateByWeights, which already implements
+ * largest-remainder for this codebase. Two implementations of "split money
+ * without losing a cent" is one too many: they drift apart, and then two
+ * screens disagree about the same receipt.
+ *
+ * What this adds is the rule that the shares must actually add up to 100 -
+ * silently normalising 90% into a whole receipt would hide a mistake the user
+ * meant to make visible.
  */
 export function splitByPercent(total: Money, percents: number[]): Money[] {
   const sum = percents.reduce((t, p) => t + p, 0);
   if (Math.abs(sum - 100) > 1e-9) {
     throw new Error(`Shares must add up to 100%, got ${sum}%.`);
   }
-  const exact = percents.map((p) => (total * p) / 100);
-  const floors = exact.map(Math.floor);
-  let left = total - floors.reduce((t, n) => t + n, 0);
-
-  // Hand the leftover cents to the largest fractional parts first.
-  const order = exact
-    .map((v, i) => ({ i, frac: v - Math.floor(v) }))
-    .sort((a, b) => b.frac - a.frac || a.i - b.i);
-
-  const out = [...floors];
-  for (const { i } of order) {
-    if (left <= 0) break;
-    out[i] += 1;
-    left -= 1;
-  }
-  return out;
+  const payees = percents.map((_, i) => ({ clientId: `i${i}`, payerPartyId: `i${i}` }));
+  return allocateByWeights(total, payees, percents).map((s) => s.amount);
 }

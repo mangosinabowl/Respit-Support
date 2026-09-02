@@ -154,3 +154,30 @@ html{scrollbar-color:var(--pink) var(--pink-soft);scrollbar-width:thin}
 *::-webkit-scrollbar-thumb{background:var(--pink);border:2px solid var(--pink-soft)}
 *::-webkit-scrollbar-thumb:hover{background:#ff9ab4}
 *::-webkit-scrollbar-corner{background:var(--pink-soft)}
+
+/* Phone. The app is used one-handed on a shift, so nothing may sit off the
+   side of the screen: rows wrap, inputs may shrink, and any wide table scrolls
+   inside its own card rather than dragging the whole page sideways. */
+.row{flex-wrap:wrap}
+.row input,.row select{min-width:0}
+input[type="datetime-local"],input[type="date"]{max-width:100%}
+.card{overflow-x:auto}
+@media(max-width:520px){
+  #app{padding:10px 10px 48px}
+  header{padding:12px}
+  h1{font-size:17px}
+  .dev{font-size:15px;padding:4px 8px}
+  .mark{width:24px;height:24px}
+  .row{gap:6px}
+  .row input,.row select,.row button,.row .file{flex:1 1 100%}
+  .row button,.row .file{text-align:center}
+  /* Small buttons are controls, not actions: they sit side by side rather than
+     each taking a whole row, which would push the calendar off the screen. */
+  .row .tiny{flex:0 1 auto;min-width:56px}
+  .grid{grid-template-columns:repeat(2,1fr)}
+  table{font-size:13px}
+  td,th{padding-right:4px}
+  .cal-cell{min-height:52px;font-size:11px;padding:3px}
+  .cal-grid{gap:2px}
+  .acts button,.acts .file{flex:1 1 auto}
+}
