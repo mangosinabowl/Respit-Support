@@ -14,6 +14,7 @@ import { expenseAsMinutes, splitByPercent } from "../domain/expenseTime";
 import { tripShares } from "../domain/mileage";
 import { checkShift, checkExpense, checkTrip, isSubmittable, type Violation } from "../domain/invariants";
 import { findOverlaps } from "../domain/overlap";
+import { checkData } from "../domain/integrity";
 import { exportAll } from "../domain/backup";
 import { syncOnce } from "../store/sync";
 import { connectDrive, driveRemote } from "../store/googleDrive";
@@ -452,6 +453,18 @@ async function render() {
           <td class="n">${trash("trip", t.id, `${t.purpose || "Trip"} (${t.distance}${t.distanceUnit})`, "trip")}</td></tr>`).join("")}
       </table>` : `<p class="empty">No trips yet.</p>`}` : `<p class="empty">Add someone you support first.</p>`}
     </section>
+
+    ${(() => {
+      // Records that contradict each other. Surfaced at the top rather than
+      // waiting for a payer to find them.
+      const problems = checkData(store);
+      if (!problems.length) return "";
+      return `<section class="card">
+        <h2>Worth a look</h2>
+        <p class="sub">Records that disagree with each other. Nothing here stops the app working, but each one would be awkward to explain to a payer.</p>
+        <table><tbody>${problems.map((p) => `<tr><td><b>${p.what}</b> ${p.detail}</td></tr>`).join("")}</tbody></table>
+      </section>`;
+    })()}
 
     ${(() => {
       const stuck = [
@@ -957,6 +970,16 @@ function shareView(as: "guardian" | "payer", clientId: string, shifts: Shift[], 
 function confirmModal() {
   const c = ui.confirm;
   if (!c) return "";
+  if (c.what === "blocked") {
+    return `<div class="overlay" data-close-modal="1"><div class="modal">
+      <h3>They were not on that shift</h3>
+      <div class="target">${c.label}</div>
+      <p>An expense or a trip can only be attached to a shift the people it is for were actually on. Attaching it anyway would put the cost on a payer for time their person was never there.</p>
+      <p>If they really were there, add them to that shift first — open it under Shifts and use <b>Add person</b>, with their own hours. Then this can be tied to it.</p>
+      <div class="acts"><button class="ghost" data-close-modal="1">Right, I will do that</button></div>
+    </div></div>`;
+  }
+
   if (c.what === "payment") {
     return `<div class="overlay" data-close-modal="1"><div class="modal">
       <h3>Mark this as paid?</h3>
@@ -987,20 +1010,24 @@ function confirmModal() {
 }
 
 /**
- * The shifts an expense or trip could belong to: only those that already have
- * one of its people on them. Attaching a receipt to a shift that person was not
- * on would put it on the wrong payer's invoice.
+ * Every shift is offered, including ones that cannot take this item.
+ *
+ * Hiding them was worse: the shift you were looking for simply was not in the
+ * list and nothing said why. Picking an impossible one now explains what is
+ * wrong and what to do about it, which is the difference between a tool that
+ * refuses and a tool that seems broken.
  */
 function shiftPicker(itemId: string, currentShiftId: string | null | undefined, clientIds: string[], shifts: Shift[], name: (id: string) => string): string {
-  const candidates = shifts.filter((sh) => sh.participants.some((p) => clientIds.includes(p.clientId)));
-  if (!candidates.length) {
-    return `<span class="sub">no shift with ${clientIds.map(name).join(" or ")} on it</span>`;
-  }
-  return `<select data-tie="${itemId}" style="max-width:210px">
+  if (!shifts.length) return `<span class="sub">no shifts yet</span>`;
+  const ordered = [...shifts].sort((a, b) => b.startAt.localeCompare(a.startAt));
+  return `<select data-tie="${itemId}" data-tie-for="${clientIds.join(",")}" style="max-width:230px">
     <option value=""${!currentShiftId ? " selected" : ""}>Not tied to a shift</option>
-    ${candidates.map((sh) => `<option value="${sh.id}"${currentShiftId === sh.id ? " selected" : ""}>
-      ${day(sh.startAt)} ${hhmm(sh.startAt)} · ${sh.participants.map((p) => name(p.clientId)).join(", ")}
-    </option>`).join("")}
+    ${ordered.map((sh) => {
+      const missing = clientIds.filter((id) => !sh.participants.some((p) => p.clientId === id));
+      return `<option value="${sh.id}"${currentShiftId === sh.id ? " selected" : ""}>
+        ${day(sh.startAt)} ${hhmm(sh.startAt)} · ${sh.participants.map((p) => name(p.clientId)).join(", ")}${missing.length ? " ⚠" : ""}
+      </option>`;
+    }).join("")}
   </select>`;
 }
 
@@ -1761,15 +1788,34 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     ui.msg = "Adjustment added. The original records are unchanged.";
   }));
 
-  all("[data-tie]", (el) => (el as HTMLSelectElement).onchange = () => go(async () => {
+  all("[data-tie]", (el) => (el as HTMLSelectElement).onchange = () => {
     const id = el.dataset.tie!;
     const shiftId = (el as HTMLSelectElement).value || null;
     const kind = allExpenses.some((x) => x.id === id) ? "expense" : "trip";
-    await emit(kind, id, { shiftId });
-    ui.msg = shiftId
-      ? "Tied to that shift. It goes out with whatever that shift is invoiced under."
-      : "Untied. It goes on the next invoice for whoever it is for.";
-  }));
+    const wanted = (el.dataset.tieFor ?? "").split(",").filter(Boolean);
+
+    if (shiftId) {
+      const target = allShifts.find((sh) => sh.id === shiftId);
+      const missing = wanted.filter((c) => !target?.participants.some((p) => p.clientId === c));
+      if (missing.length) {
+        // Refuse and explain. Attaching it anyway would put the cost on a payer
+        // for a shift their person was never on.
+        ui.confirm = {
+          kind: "cannot-tie", id: "",
+          label: `${missing.map(name).join(" and ")} ${missing.length === 1 ? "was" : "were"} not on ${day(target!.startAt)} ${hhmm(target!.startAt)}`,
+          what: "blocked",
+        };
+        render();
+        return;
+      }
+    }
+    void go(async () => {
+      await emit(kind, id, { shiftId });
+      ui.msg = shiftId
+        ? "Tied to that shift. It goes out with whatever that shift is invoiced under."
+        : "Untied. It goes on the next invoice for whoever it is for.";
+    });
+  });
 
   all("[data-rehome]", (el) => el.onclick = () => go(async () => {
     const [kind, id] = el.dataset.rehome!.split(":") as ["expense" | "trip", string];
