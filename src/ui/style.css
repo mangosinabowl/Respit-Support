@@ -123,3 +123,20 @@ select.view-calendar,.view-calendar{background:var(--cyan-soft);border-color:var
 .cal-bar b{font-size:11px}
 .cal-bar .sub{font-size:10px}
 @media(max-width:620px){.cal-year{grid-template-columns:repeat(6,1fr)}}
+
+/* Bi-weekly: both weeks in full, stacked. The current week carries the detail;
+   the week after is the same content at a smaller size. */
+.cal-fortnight{display:flex;flex-direction:column;gap:14px;margin-top:12px}
+.fn-week h4{margin:0 0 6px;font-size:13px;display:flex;justify-content:space-between;align-items:baseline;gap:10px}
+.fn-week h4 .sub{font-weight:400}
+/* Named "earlier" rather than "secondary": .primary is already the big orange
+   button style, and the class collided, painting the whole week orange. */
+.fn-week.earlier{opacity:.85}
+.fn-week.earlier .cal-day{padding:5px 8px}
+.fn-week.earlier .cal-day b{font-size:12px}
+.fn-week.earlier .ev{font-size:11.5px}
+.fn-week.earlier .sub{font-size:10.5px}
+/* Three months: same size each, one above the other, each a real grid. */
+.cal-stack{display:flex;flex-direction:column;gap:16px;margin-top:12px}
+.cal-month-block h4{margin:0 0 6px;font-size:13px;display:flex;justify-content:space-between;align-items:baseline;gap:10px}
+.cal-month-block h4 .sub{font-weight:400}

@@ -25,9 +25,10 @@ describe("spanFor", () => {
     expect(daysIn(s)).toHaveLength(7);
   });
 
-  it("a fortnight is two of those weeks", () => {
+  it("bi-weekly is this week and the one before, not the one after", () => {
+    // 2 September 2026 is a Wednesday, so this week starts Monday 31 August.
     const s = spanFor("2026-09-02", "fortnight");
-    expect([s.from, s.to]).toEqual(["2026-08-31", "2026-09-13"]);
+    expect([s.from, s.to]).toEqual(["2026-08-24", "2026-09-06"]);
     expect(daysIn(s)).toHaveLength(14);
   });
 
@@ -37,13 +38,16 @@ describe("spanFor", () => {
     expect(spanFor("2026-12-31", "month")).toMatchObject({ from: "2026-12-01", to: "2026-12-31" });
   });
 
-  it("two-month spans are fixed pairs, so the grouping does not slide", () => {
-    // Any day in September or October gives the same pair.
-    const a = spanFor("2026-09-02", "twoMonths");
-    const b = spanFor("2026-10-30", "twoMonths");
-    expect(a.from).toBe(b.from);
-    expect([a.from, a.to]).toEqual(["2026-09-01", "2026-10-31"]);
-    expect(monthsIn(a).map((m) => m.label)).toEqual(["September", "October"]);
+  it("three months is this month and the two before it", () => {
+    const s = spanFor("2026-09-02", "threeMonths");
+    expect([s.from, s.to]).toEqual(["2026-07-01", "2026-09-30"]);
+    expect(monthsIn(s).map((m) => m.label)).toEqual(["July", "August", "September"]);
+  });
+
+  it("three months reaches back across a year boundary", () => {
+    const s = spanFor("2026-01-15", "threeMonths");
+    expect([s.from, s.to]).toEqual(["2025-11-01", "2026-01-31"]);
+    expect(monthsIn(s).map((m) => m.label)).toEqual(["November", "December", "January"]);
   });
 
   it("a year is the whole year", () => {
@@ -55,7 +59,7 @@ describe("spanFor", () => {
 
 describe("step", () => {
   it("moves by whole spans and back again", () => {
-    for (const grain of ["day", "week", "fortnight", "month", "twoMonths", "year"] as const) {
+    for (const grain of ["day", "week", "fortnight", "month", "threeMonths", "year"] as const) {
       const there = step("2026-09-02", grain, 1);
       const back = step(there, grain, -1);
       expect(spanFor(back, grain).from, grain).toBe(spanFor("2026-09-02", grain).from);

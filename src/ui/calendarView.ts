@@ -70,19 +70,20 @@ export function sumRange(tally: Map<string, DayTally>, from: string, to: string)
 }
 
 /** How much detail each zoom shows. Kept here so the view and the labels agree. */
-export function detailFor(grain: Grain): "everything" | "summary" | "chips" | "indicators" {
+export function detailFor(grain: Grain): "everything" | "twoWeeks" | "summary" | "months" | "indicators" {
   if (grain === "day" || grain === "week") return "everything";
-  if (grain === "fortnight" || grain === "month") return "summary";
-  if (grain === "twoMonths") return "chips";
+  if (grain === "fortnight") return "twoWeeks";
+  if (grain === "month") return "summary";
+  if (grain === "threeMonths") return "months";
   return "indicators";
 }
 
 export const GRAINS: { key: Grain; label: string }[] = [
   { key: "day", label: "Day" },
   { key: "week", label: "Week" },
-  { key: "fortnight", label: "Fortnight" },
+  { key: "fortnight", label: "Bi-weekly" },
   { key: "month", label: "Month" },
-  { key: "twoMonths", label: "Two months" },
+  { key: "threeMonths", label: "Three months" },
   { key: "year", label: "Year" },
 ];
 
@@ -123,53 +124,78 @@ function summaryDay(key: string, t: DayTally | undefined): string {
  * a fortnight of full entries is unreadable, and a year of them is meaningless,
  * so each level shows the most that still fits.
  */
+/** A month as a full day grid, used on its own and stacked three at a time. */
+function monthGrid(from: string, to: string, label: string, tally: Map<string, DayTally>): string {
+  const days: string[] = [];
+  for (let k = from; k <= to; ) {
+    days.push(k);
+    const d = new Date(`${k}T12:00:00`);
+    d.setDate(d.getDate() + 1);
+    k = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  }
+  const lead = (new Date(`${days[0]}T12:00:00`).getDay() + 6) % 7;
+  const t = sumRange(tally, from, to);
+  return `<div class="cal-month-block">
+    <h4>${label}<span class="sub">${t.shifts.length ? `${t.shifts.length} shift${t.shifts.length === 1 ? "" : "s"} · ${hrs(t.minutes)} · ${cash(t.money)}` : "nothing recorded"}</span></h4>
+    <div class="cal-grid">
+      ${["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d) => `<div class="cal-head">${d}</div>`).join("")}
+      ${Array.from({ length: lead }, () => `<div class="cal-cell blank"></div>`).join("")}
+      ${days.map((k) => summaryDay(k, tally.get(k))).join("")}
+    </div>
+  </div>`;
+}
+
+/**
+ * The calendar at whatever zoom is chosen. Detail falls away as the span grows,
+ * because a season of full entries is unreadable - but every level still shows
+ * real days rather than a summary standing in for them.
+ */
 export function renderCalendar(span: Span, tally: Map<string, DayTally>, name: (id: string) => string): string {
   const detail = detailFor(span.grain);
-  const days = span.grain === "year" || span.grain === "twoMonths" ? [] : daysIn(span);
 
   if (span.grain === "day") {
     return `<div class="cal-list">${fullDay(span.from, tally.get(span.from), name)}</div>`;
   }
 
   if (detail === "everything") {
-    return `<div class="cal-week">${days.map((k) => fullDay(k, tally.get(k), name)).join("")}</div>`;
+    return `<div class="cal-week">${daysIn(span).map((k) => fullDay(k, tally.get(k), name)).join("")}</div>`;
   }
 
-  if (detail === "summary") {
-    // Pad so the first day lands under its weekday.
-    const lead = (new Date(`${days[0]}T12:00:00`).getDay() + 6) % 7;
-    return `<div class="cal-grid">
-      ${["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d) => `<div class="cal-head">${d}</div>`).join("")}
-      ${Array.from({ length: lead }, () => `<div class="cal-cell blank"></div>`).join("")}
-      ${days.map((k) => summaryDay(k, tally.get(k))).join("")}
+  if (detail === "twoWeeks") {
+    // Both weeks in full, stacked, with THIS week on top: it is the one being
+    // worked, so it carries the detail. Last week sits under it, smaller,
+    // because it is for checking rather than working from.
+    const all = daysIn(span);
+    const first = all.slice(7);   // this week
+    const second = all.slice(0, 7); // last week
+    const sum = (ds: string[]) => sumRange(tally, ds[0], ds[ds.length - 1]);
+    const a = sum(first);
+    const b = sum(second);
+    return `<div class="cal-fortnight">
+      <div class="fn-week current">
+        <h4>This week<span class="sub">${a.shifts.length ? `${hrs(a.minutes)} · ${cash(a.money)}` : "nothing"}</span></h4>
+        <div class="cal-week">${first.map((k) => fullDay(k, tally.get(k), name)).join("")}</div>
+      </div>
+      <div class="fn-week earlier">
+        <h4>Last week<span class="sub">${b.shifts.length ? `${hrs(b.minutes)} · ${cash(b.money)}` : "nothing"}</span></h4>
+        <div class="cal-week">${second.map((k) => fullDay(k, tally.get(k), name)).join("")}</div>
+      </div>
     </div>`;
   }
 
-  if (detail === "chips") {
-    return `<div class="cal-months">${monthsIn(span).map((m) => {
-      const t = sumRange(tally, m.from, m.to);
-      const worked = t.shifts.length;
-      return `<div class="cal-month">
-        <h4>${m.label}</h4>
-        ${worked ? `<span class="chip">${worked} shift${worked === 1 ? "" : "s"}</span>
-          <span class="chip">${hrs(t.minutes)}</span>
-          <span class="chip money">${cash(t.money)}</span>
-          ${t.expenses.length ? `<span class="chip">${t.expenses.length} expense${t.expenses.length === 1 ? "" : "s"}</span>` : ""}
-          ${t.trips.length ? `<span class="chip">${t.trips.length} trip${t.trips.length === 1 ? "" : "s"}</span>` : ""}
-          ${t.incident ? `<span class="chip warn">incident</span>` : ""}`
-        : `<span class="sub">nothing recorded</span>`}
-      </div>`;
-    }).join("")}</div>`;
+  if (detail === "summary" || detail === "months") {
+    // One month, or three stacked at the same size - each a real grid of days,
+    // not a chip standing in for a month.
+    // Most recent first: this month on top, then back through the previous two.
+    return `<div class="cal-stack">${[...monthsIn(span)].reverse().map((m) => monthGrid(m.from, m.to, `${m.label} ${m.from.slice(0, 4)}`, tally)).join("")}</div>`;
   }
 
-  // A year: one bar per month, scaled against the busiest, so the shape of the
-  // year reads at a glance without any figures to compare.
   const months = monthsIn(span).map((m) => ({ ...m, t: sumRange(tally, m.from, m.to) }));
   const peak = Math.max(1, ...months.map((m) => m.t.minutes));
   return `<div class="cal-year">${months.map((m) => `<div class="cal-bar">
       <div class="bar"><div class="fill${m.t.incident ? " incident" : ""}" style="height:${Math.round((m.t.minutes / peak) * 100)}%"></div></div>
       <b>${m.label.slice(0, 3)}</b>
-      <span class="sub">${m.t.minutes ? hrs(m.t.minutes) : "\u2014"}</span>
+      <span class="sub">${m.t.minutes ? hrs(m.t.minutes) : "—"}</span>
       <span class="sub">${m.t.money ? cash(m.t.money) : ""}</span>
     </div>`).join("")}</div>`;
 }

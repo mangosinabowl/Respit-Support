@@ -1,4 +1,4 @@
-export type Grain = "day" | "week" | "fortnight" | "month" | "twoMonths" | "year";
+export type Grain = "day" | "week" | "fortnight" | "month" | "threeMonths" | "year";
 
 export interface Span {
   /** Local YYYY-MM-DD, inclusive. */
@@ -58,21 +58,25 @@ export function spanFor(anchor: string, grain: Grain): Span {
     return { from, to: addDays(from, 6), grain, label: `Week of ${asDate(from).toLocaleDateString("en-CA", { day: "numeric", month: "long", year: "numeric" })}` };
   }
   if (grain === "fortnight") {
-    const from = startOfWeek(anchor);
-    return { from, to: addDays(from, 13), grain, label: `Fortnight from ${asDate(from).toLocaleDateString("en-CA", { day: "numeric", month: "long", year: "numeric" })}` };
+    // Looks BACK: this week and the one before it. What was worked matters more
+    // than what is scheduled - the week ahead is usually empty anyway.
+    const thisWeek = startOfWeek(anchor);
+    const from = addDays(thisWeek, -7);
+    const to = addDays(thisWeek, 6);
+    return { from, to, grain, label: `Two weeks to ${asDate(to).toLocaleDateString("en-CA", { day: "numeric", month: "long", year: "numeric" })}` };
   }
   if (grain === "month") {
     const from = `${year}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
     const to = asKey(new Date(year, d.getMonth() + 1, 0));
     return { from, to, grain, label: `${MONTHS[d.getMonth()]} ${year}` };
   }
-  if (grain === "twoMonths") {
-    // Anchored to a fixed pair so the same two months always group together,
-    // rather than sliding as the anchor moves.
-    const firstMonth = Math.floor(d.getMonth() / 2) * 2;
-    const from = `${year}-${String(firstMonth + 1).padStart(2, "0")}-01`;
-    const to = asKey(new Date(year, firstMonth + 2, 0));
-    return { from, to, grain, label: `${MONTHS[firstMonth]} and ${MONTHS[firstMonth + 1]} ${year}` };
+  if (grain === "threeMonths") {
+    // This month and the two before it, not a fixed quarter: on the 1st of a
+    // quarter a fixed window would show almost nothing that had been worked.
+    const start = new Date(year, d.getMonth() - 2, 1);
+    const from = asKey(start);
+    const to = asKey(new Date(year, d.getMonth() + 1, 0));
+    return { from, to, grain, label: `${MONTHS[start.getMonth()]} to ${MONTHS[d.getMonth()]} ${d.getMonth() < start.getMonth() ? "" : year}`.trim() };
   }
   return { from: `${year}-01-01`, to: `${year}-12-31`, grain, label: `${year}` };
 }
@@ -84,7 +88,7 @@ export function step(anchor: string, grain: Grain, steps: number): string {
   if (grain === "week") return addDays(anchor, 7 * steps);
   if (grain === "fortnight") return addDays(anchor, 14 * steps);
   if (grain === "month") return asKey(new Date(d.getFullYear(), d.getMonth() + steps, 1));
-  if (grain === "twoMonths") return asKey(new Date(d.getFullYear(), d.getMonth() + 2 * steps, 1));
+  if (grain === "threeMonths") return asKey(new Date(d.getFullYear(), d.getMonth() + 3 * steps, 1));
   return asKey(new Date(d.getFullYear() + steps, d.getMonth(), 1));
 }
 
