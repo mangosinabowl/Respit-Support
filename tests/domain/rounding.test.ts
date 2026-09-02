@@ -40,20 +40,27 @@ describe("money rounds up to the cent", () => {
   });
 });
 
-describe("dividing a known total still lands exactly", () => {
-  it("does NOT round each share up, because that would invent money", () => {
-    // Rounding up three shares of $10 would come to $10.02 and hand the worker
-    // two cents that nobody paid. A receipt is a fixed amount being divided,
-    // not a rate being applied, so the remainder is distributed instead.
+describe("dividing a receipt rounds up too", () => {
+  it("charges each share rounded up, even though that exceeds the receipt", () => {
+    // The deliberate rule: $10 three ways is $3.34 each, $10.02 charged. The
+    // worker paid the $10 and is providing the service; he does not absorb the
+    // fraction, and every payer is charged the same as the others.
     const parts = splitByPercent(1000, [100 / 3, 100 / 3, 100 / 3]);
-    expect(parts.reduce((t, n) => t + n, 0)).toBe(1000);
-    expect(parts).toEqual([334, 333, 333]);
+    expect(parts).toEqual([334, 334, 334]);
+    expect(parts.reduce((t, n) => t + n, 0)).toBe(1002);
   });
 
-  it("holds for awkward percentages too", () => {
-    for (const total of [999, 1, 12345, 100]) {
-      const parts = splitByPercent(total, [17.5, 33.3, 49.2]);
-      expect(parts.reduce((t, n) => t + n, 0), `total ${total}`).toBe(total);
+  it("never comes to less than the receipt", () => {
+    // The direction is what matters: it may exceed, it may never fall short,
+    // because falling short means working at a loss.
+    for (const total of [999, 1, 12345, 100, 3333]) {
+      for (const shares of [[17.5, 33.3, 49.2], [50, 50], [100], [25, 25, 25, 25]]) {
+        const parts = splitByPercent(total, shares);
+        const sum = parts.reduce((t, n) => t + n, 0);
+        expect(sum, `${total} by ${shares.join("/")}`).toBeGreaterThanOrEqual(total);
+        // And never more than one cent per share above it.
+        expect(sum - total).toBeLessThanOrEqual(shares.length);
+      }
     }
   });
 });

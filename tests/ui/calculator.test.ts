@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { newCalc, press, splitPreview, evenShares, type CalcState } from "../../src/ui/calculator";
+import { splitByPercent } from "../../src/domain/expenseTime";
 
 const type = (keys: string[], start: CalcState = newCalc()) => keys.reduce(press, start);
 const shown = (keys: string[]) => type(keys).entry;
@@ -54,14 +55,16 @@ describe("split mode", () => {
     expect(rows.map((r) => r.amount)).toEqual([1500, 1500]);
   });
 
-  it("accounts for every cent when it does not divide evenly", () => {
+  it("rounds each share up, matching how the app charges", () => {
     const { rows } = splitPreview("10.00", evenShares(3));
-    expect(rows.reduce((t, r) => t + r.amount, 0)).toBe(1000);
+    expect(rows.reduce((t, r) => t + r.amount, 0)).toBeGreaterThanOrEqual(1000);
   });
 
   it("agrees with the split the app itself would record", () => {
+    // Same function underneath, so the scratch pad cannot disagree with what
+    // gets saved a moment later - including the rounding up.
     const { rows } = splitPreview("100.00", [33.33, 33.33, 33.34]);
-    expect(rows.reduce((t, r) => t + r.amount, 0)).toBe(10000);
+    expect(rows.map((r) => r.amount)).toEqual(splitByPercent(10000, [33.33, 33.33, 33.34]));
   });
 
   it("refuses to guess when the shares do not add up", () => {

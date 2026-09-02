@@ -33,15 +33,20 @@ describe("splitByPercent", () => {
     expect(parts.reduce((t, n) => t + n, 0)).toBe(3000);
   });
 
-  it("accounts for every cent when the split does not divide evenly", () => {
+  it("rounds every share up, so the worker is never out of pocket", () => {
+    // $10 three ways is $3.34 each and $10.02 charged. The worker laid the
+    // money out; he does not absorb the fraction for having done the job, and
+    // each payer is charged the same amount as the others.
     const parts = splitByPercent(1000, [100 / 3, 100 / 3, 100 / 3]);
-    expect(parts.reduce((t, n) => t + n, 0)).toBe(1000);
-    expect(parts).toEqual([334, 333, 333]);
+    expect(parts).toEqual([334, 334, 334]);
+    expect(parts.reduce((t, n) => t + n, 0)).toBe(1002);
   });
 
-  it("honours uneven percentages", () => {
+  it("honours uneven percentages, still rounding each up", () => {
+    // Shares that divide cleanly are unchanged.
     expect(splitByPercent(1000, [50, 30, 20])).toEqual([500, 300, 200]);
-    expect(splitByPercent(999, [50, 50]).reduce((t, n) => t + n, 0)).toBe(999);
+    // 999 split evenly is 499.5 each, so both land on 500 and it comes to 1000.
+    expect(splitByPercent(999, [50, 50])).toEqual([500, 500]);
   });
 
   it("refuses shares that do not add up to 100", () => {

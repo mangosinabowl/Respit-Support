@@ -1,4 +1,3 @@
-import { allocateByWeights } from "./allocation";
 import type { Money } from "./primitives";
 
 /**
@@ -21,20 +20,24 @@ export function expenseAsMinutes(share: Money, ratePerHour: Money): number {
 /**
  * Divides an amount by percentage shares that must total 100.
  *
- * The apportionment itself is allocateByWeights, which already implements
- * largest-remainder for this codebase. Two implementations of "split money
- * without losing a cent" is one too many: they drift apart, and then two
- * screens disagree about the same receipt.
+ * Every share rounds UP to the cent, so the parts can come to slightly more
+ * than the amount being divided: $10 three ways is $3.34 each, and $10.02
+ * invoiced. That is deliberate and it is the worker's rule. He laid the money
+ * out, he is providing the service, and the alternative is that he absorbs a
+ * fraction of a cent on every shared receipt for the rest of his working life.
+ * Nobody is short-changed by it - each payer is charged their own share rounded
+ * up, equally - and he is never out of pocket for having done the job.
  *
- * What this adds is the rule that the shares must actually add up to 100 -
- * silently normalising 90% into a whole receipt would hide a mistake the user
- * meant to make visible.
+ * This is the opposite of the usual accounting instinct, which is why it is
+ * written down here rather than left to be discovered.
  */
 export function splitByPercent(total: Money, percents: number[]): Money[] {
   const sum = percents.reduce((t, p) => t + p, 0);
   if (Math.abs(sum - 100) > 1e-9) {
     throw new Error(`Shares must add up to 100%, got ${sum}%.`);
   }
-  const payees = percents.map((_, i) => ({ clientId: `i${i}`, payerPartyId: `i${i}` }));
-  return allocateByWeights(total, payees, percents).map((s) => s.amount);
+  return percents.map((p) => Math.ceil((total * p) / 100));
 }
+
+/** What the parts actually come to once each has been rounded up. */
+export const splitTotal = (parts: Money[]): Money => parts.reduce((t, n) => t + n, 0);

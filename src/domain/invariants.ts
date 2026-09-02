@@ -37,14 +37,20 @@ export function checkExpense(expense: Expense): Violation[] {
     });
   } else {
     const sum = expense.splits.reduce((t, s) => t + s.amount, 0);
-    if (sum !== expense.totalAmount) {
-      const diff = expense.totalAmount - sum;
+    // Shares round UP to the cent, so the parts may come to slightly more than
+    // the receipt: $10 three ways is $3.34 each and $10.02 charged. That is the
+    // rule - the worker laid the money out and does not absorb the fraction.
+    // The allowance is one cent per share, which is the most rounding up can
+    // add; anything beyond that is a real mistake and still reported.
+    const allowance = expense.splits.length;
+    const over = sum - expense.totalAmount;
+    if (over < 0 || over > allowance) {
       violations.push({
         code: "SPLITS_DO_NOT_SUM",
         message:
-          diff > 0
-            ? `$${dollars(diff)} of this expense is not assigned to anyone.`
-            : `$${dollars(-diff)} more than the receipt is assigned out.`,
+          over < 0
+            ? `$${dollars(-over)} of this expense is not assigned to anyone.`
+            : `$${dollars(over)} more than the receipt is assigned out, which is more than rounding up can explain.`,
         field: "splits",
       });
     }

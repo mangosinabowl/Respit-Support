@@ -55,7 +55,38 @@ describe("checkExpense", () => {
       }),
     );
     expect(v[0].code).toBe("SPLITS_DO_NOT_SUM");
-    expect(v[0].message).toBe("$6.00 more than the receipt is assigned out.");
+    expect(v[0].message).toBe("$6.00 more than the receipt is assigned out, which is more than rounding up can explain.");
+  });
+
+  it("accepts the cents that rounding each share up adds", () => {
+    // $10 three ways is $3.34 each, so $10.02 is charged. That is the rule, not
+    // a mistake: the worker laid the money out and does not absorb the
+    // fraction. Only an overage bigger than one cent per share is a real error.
+    const v = checkExpense(
+      expense({
+        totalAmount: 1000,
+        splits: [
+          { clientId: "c1", payerPartyId: "p1", amount: 334 },
+          { clientId: "c2", payerPartyId: "p2", amount: 334 },
+          { clientId: "c3", payerPartyId: "p3", amount: 334 },
+        ],
+      }),
+    );
+    expect(v.filter((x) => x.code === "SPLITS_DO_NOT_SUM")).toEqual([]);
+  });
+
+  it("still catches an overage too big for rounding", () => {
+    const v = checkExpense(
+      expense({
+        totalAmount: 1000,
+        splits: [
+          { clientId: "c1", payerPartyId: "p1", amount: 400 },
+          { clientId: "c2", payerPartyId: "p2", amount: 400 },
+          { clientId: "c3", payerPartyId: "p3", amount: 400 },
+        ],
+      }),
+    );
+    expect(v[0].code).toBe("SPLITS_DO_NOT_SUM");
   });
 
   it("flags an expense with no splits at all", () => {
