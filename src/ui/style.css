@@ -10,7 +10,12 @@ body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-app
 #app{max-width:860px;margin:0 auto;padding:16px 16px 64px}
 header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;background:var(--orange);color:#fff;margin-bottom:14px}
 h1{font-size:19px;margin:0;letter-spacing:-.01em}
-.dev{font-size:12px;opacity:.9}
+.brand{display:flex;align-items:center;gap:9px}
+.mark{width:28px;height:28px;display:block;border-radius:6px}
+/* Large on purpose: with several devices syncing, which one you are holding
+   decides whose log you are adding to. */
+.dev small{font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;opacity:.85;margin-right:4px}
+.dev{font-size:17px;font-weight:700;letter-spacing:.04em;background:rgba(255,255,255,.22);padding:5px 11px;white-space:nowrap}
 h2{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:0 0 10px;font-weight:600}
 .card{background:var(--panel);border:1px solid var(--line);padding:14px;margin-bottom:12px}
 .card.live{border-left:4px solid var(--cyan);background:var(--cyan-soft)}
@@ -140,3 +145,12 @@ select.view-calendar,.view-calendar{background:var(--cyan-soft);border-color:var
 .cal-stack{display:flex;flex-direction:column;gap:16px;margin-top:12px}
 .cal-month-block h4{margin:0 0 6px;font-size:13px;display:flex;justify-content:space-between;align-items:baseline;gap:10px}
 .cal-month-block h4 .sub{font-weight:400}
+
+/* Baby pink scrollbars. Firefox takes the two-colour form; WebKit and Blink
+   need the pseudo-elements, so both are given. */
+html{scrollbar-color:var(--pink) var(--pink-soft);scrollbar-width:thin}
+*::-webkit-scrollbar{width:11px;height:11px}
+*::-webkit-scrollbar-track{background:var(--pink-soft)}
+*::-webkit-scrollbar-thumb{background:var(--pink);border:2px solid var(--pink-soft)}
+*::-webkit-scrollbar-thumb:hover{background:#ff9ab4}
+*::-webkit-scrollbar-corner{background:var(--pink-soft)}

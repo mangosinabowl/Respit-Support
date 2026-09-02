@@ -230,7 +230,10 @@ async function render() {
   })), ui.sort.expenses);
 
   app.innerHTML = `
-    <header><h1>Respite Support</h1><span class="dev">device ${dev.slice(0, 8)}</span></header>
+    <header>
+      <span class="brand"><h1>Respite Support</h1><img class="mark" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCIgcm9sZT0iaW1nIiBhcmlhLWxhYmVsPSJBIGhhbmQgY3JhZGxpbmcgYSBoZWFydCI+CiAgPHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiByeD0iMTQiIGZpbGw9IiNmZmZhZjUiLz4KICA8IS0tIFRoZSBjcmFkbGluZyBoYW5kLiBCb2xkIGFuZCBsb3cgc28gaXQgc3RpbGwgcmVhZHMgYXMgYSBjdXBwZWQgc2hhcGUgYXQKICAgICAgIDE2IHBpeGVscywgd2hlcmUgYW55IGZpbmdlciBkZXRhaWwgd291bGQgdHVybiB0byBtdXNoLiAtLT4KICA8cGF0aCBkPSJNMTEgMzdjMC0yLjcgMi4yLTQuOSA0LjktNC45IDEuNiAwIDMgLjggMy45IDJ2LS4xYzAtMi43IDIuMi00LjkgNC45LTQuOXM0LjkgMi4yIDQuOSA0LjljMC0yLjcgMi4yLTQuOSA0LjktNC45czQuOSAyLjIgNC45IDQuOWMuOS0xLjIgMi4zLTIgMy45LTIgMi43IDAgNC45IDIuMiA0LjkgNC45djMuM0M0OC4xIDQ4LjYgNDEgNTUgMzIgNTVTMTUuOSA0OC42IDExIDQwLjN6IiBmaWxsPSIjZmY5ZjVhIi8+CiAgPCEtLSBUaGUgaGVhcnQgYmVpbmcgaGVsZC4gLS0+CiAgPHBhdGggZD0iTTMyIDMwLjVzLTEwLjQtNS43LTEwLjQtMTIuNGMwLTMuNiAyLjktNi41IDYuNS02LjUgMi4xIDAgMy45IDEgNSAyLjYgMS4xLTEuNiAyLjktMi42IDUtMi42IDMuNiAwIDYuNSAyLjkgNi41IDYuNUM0NC42IDI0LjggMzIgMzAuNSAzMiAzMC41eiIgZmlsbD0iI2ZmYjNjNiIvPgo8L3N2Zz4K" alt="" /></span>
+      <span class="dev"><small>device</small> ${dev.slice(0, 8)}</span>
+    </header>
     <section class="card view-${ui.view.as}">
       <h2>Viewing as</h2>
       <div class="row">

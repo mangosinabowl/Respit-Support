@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="A hand cradling a heart">
+  <rect width="64" height="64" rx="14" fill="#fffaf5"/>
+  <!-- The cradling hand. Bold and low so it still reads as a cupped shape at
+       16 pixels, where any finger detail would turn to mush. -->
+  <path d="M11 37c0-2.7 2.2-4.9 4.9-4.9 1.6 0 3 .8 3.9 2v-.1c0-2.7 2.2-4.9 4.9-4.9s4.9 2.2 4.9 4.9c0-2.7 2.2-4.9 4.9-4.9s4.9 2.2 4.9 4.9c.9-1.2 2.3-2 3.9-2 2.7 0 4.9 2.2 4.9 4.9v3.3C48.1 48.6 41 55 32 55S15.9 48.6 11 40.3z" fill="#ff9f5a"/>
+  <!-- The heart being held. -->
+  <path d="M32 30.5s-10.4-5.7-10.4-12.4c0-3.6 2.9-6.5 6.5-6.5 2.1 0 3.9 1 5 2.6 1.1-1.6 2.9-2.6 5-2.6 3.6 0 6.5 2.9 6.5 6.5C44.6 24.8 32 30.5 32 30.5z" fill="#ffb3c6"/>
+</svg>
