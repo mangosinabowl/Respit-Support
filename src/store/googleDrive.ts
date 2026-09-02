@@ -12,7 +12,12 @@ export const GOOGLE_CLIENT_ID = "1051566713700-rpskgfpp5ltim40l74a6to8lmdngmug7.
  * appdata is a folder only this app can see. It cannot read the user's
  * documents or photos, and the sync files do not clutter their Drive.
  */
-const SCOPE = "https://www.googleapis.com/auth/drive.appdata";
+const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.appdata";
+/**
+ * Asked for together so the user approves once. Calendar is app.created only:
+ * the app may manage calendars it made and nothing else.
+ */
+const SCOPE = `${DRIVE_SCOPE} https://www.googleapis.com/auth/calendar.app.created`;
 const FILES = "https://www.googleapis.com/drive/v3/files";
 const UPLOAD = "https://www.googleapis.com/upload/drive/v3/files";
 

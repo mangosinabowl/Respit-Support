@@ -6,6 +6,8 @@ import { owedByPayer } from "../domain/queries";
 import { clientsVisibleTo, filterShiftFor, filterExpenseFor, type AudienceContext } from "../domain/audience";
 import { buildInvoice, type Invoice } from "../domain/invoice";
 import { printInvoices } from "./invoicePrint";
+import { renderCalendar, tallyByDay, GRAINS, spanFor, type Grain } from "./calendarView";
+import { step, todayKey, dayKey } from "../domain/calendar";
 import { expenseAsMinutes, splitByPercent } from "../domain/expenseTime";
 import { tripShares } from "../domain/mileage";
 import { checkShift, checkExpense, checkTrip, isSubmittable, type Violation } from "../domain/invariants";
@@ -13,6 +15,7 @@ import { shrinkImage, readableSize } from "./photo";
 import { exportAll } from "../domain/backup";
 import { syncOnce } from "../store/sync";
 import { connectDrive, driveRemote } from "../store/googleDrive";
+import { pushShifts } from "../store/googleCalendar";
 import { newId, nowInstant } from "../domain/primitives";
 import { splitShiftAt, mergeShifts } from "../domain/operations";
 import type { Shift, Expense, Client, Trip, Note, Attachment, Adjustment } from "../domain/entities";
@@ -50,7 +53,9 @@ const ui = {
     /** Set when Google refuses silently, so we ask rather than popping windows. */
     needsConnect: false,
   },
-  view: { as: "me", clientId: "" } as { as: "me" | "guardian" | "payer" | "archived"; clientId: string },
+  view: { as: "me", clientId: "" } as { as: "me" | "guardian" | "payer" | "archived" | "calendar"; clientId: string },
+  cal: { anchor: todayKey(), grain: "week" as Grain },
+  calMsg: "",
   sort: { shifts: { key: "startAt", dir: -1 }, expenses: { key: "occurredAt", dir: -1 }, owed: { key: "unclaimed", dir: -1 } },
 };
 
@@ -233,6 +238,7 @@ async function render() {
           <option value="me"${ui.view.as === "me" ? " selected" : ""}>Me — everything</option>
           <option value="guardian"${ui.view.as === "guardian" ? " selected" : ""}>Guardian — one person only</option>
           <option value="payer"${ui.view.as === "payer" ? " selected" : ""}>Payer — expenses as extra time</option>
+          <option value="calendar"${ui.view.as === "calendar" ? " selected" : ""}>Calendar — when it all happened</option>
           <option value="archived"${ui.view.as === "archived" ? " selected" : ""}>Archived — put away, not gone</option>
         </select>
         ${ui.view.as === "guardian" || ui.view.as === "payer" ? `<select id="viewWho">
@@ -242,6 +248,7 @@ async function render() {
       </div>
     </section>
     ${ui.view.as === "me" ? ""
+      : ui.view.as === "calendar" ? calendarSection(allShifts, allExpenses, allTrips, notes, name)
       : ui.view.as === "archived" ? archivedView(archived, shiftsAll, allExpenses, owed, name, allTrips)
       : ui.view.clientId === "__all" ? everyoneView(ui.view.as, clients, allShifts, allExpenses, allTrips, adjustments)
       : shareView(ui.view.as, ui.view.clientId || clients[0]?.id || "", allShifts, expenses, everyone, name, trips, notes, store, adjustments)}
@@ -508,6 +515,30 @@ function archivedView(people: Client[], shifts: Shift[], expenses: Expense[], ow
  * what prints as one page each. Anyone owed nothing is left out - a page
  * reading zero is noise on an invoice run.
  */
+/** The calendar, with its own zoom and navigation. */
+function calendarSection(shifts: Shift[], expenses: Expense[], trips: Trip[], notes: Note[], name: (id: string) => string) {
+  const span = spanFor(ui.cal.anchor, ui.cal.grain);
+  const tally = tallyByDay(shifts, expenses, trips, notes, Intl.DateTimeFormat().resolvedOptions().timeZone);
+  return `<section class="card view-calendar">
+    <h2>Calendar</h2>
+    <div class="row" style="flex-wrap:wrap">
+      <select id="calGrain" style="max-width:150px">
+        ${GRAINS.map((g) => `<option value="${g.key}"${ui.cal.grain === g.key ? " selected" : ""}>${g.label}</option>`).join("")}
+      </select>
+      <button class="tiny ghost" data-cal-step="-1">←</button>
+      <button class="tiny ghost" data-cal-today="1">Today</button>
+      <button class="tiny ghost" data-cal-step="1">→</button>
+      <b style="margin-left:8px">${span.label}</b>
+    </div>
+    ${renderCalendar(span, tally, name)}
+    <div class="acts" style="margin-top:14px">
+      <button class="tiny pink" id="toGoogle">Put these shifts in Google Calendar</button>
+    </div>
+    <p class="sub">Goes into its own calendar called "Respite Support", which you can hide or delete without touching your own. Sending again updates the same events rather than duplicating them.</p>
+    <p class="msg">${ui.calMsg}</p>
+  </section>`;
+}
+
 function everyoneView(as: "guardian" | "payer", clients: Client[], shifts: Shift[], expenses: Expense[], trips: Trip[], adjustments: Adjustment[]) {
   const all = clients.map((c) => ({
     client: c,
@@ -1283,6 +1314,32 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     const c = everyoneList.find((x) => x.id === cid);
     return buildInvoice(`payer-${cid}`, cid, c?.name ?? "Unknown", allShifts, allExpenses, allTrips, adjustments);
   };
+
+  if ($("calGrain")) ($("calGrain") as unknown as HTMLSelectElement).onchange = (e: any) => {
+    ui.cal.grain = e.target.value;
+    render();
+  };
+  all("[data-cal-step]", (el) => el.onclick = () => {
+    ui.cal.anchor = step(ui.cal.anchor, ui.cal.grain, Number(el.dataset.calStep));
+    render();
+  });
+  all("[data-cal-today]", (el) => el.onclick = () => { ui.cal.anchor = todayKey(); render(); });
+
+  if ($("toGoogle")) $("toGoogle")!.onclick = () => go(async () => {
+    const span = spanFor(ui.cal.anchor, ui.cal.grain);
+    const inView = allShifts.filter((s) => s.endAt && dayKey(s.startAt) >= span.from && dayKey(s.startAt) <= span.to);
+    if (!inView.length) throw new Error("No finished shifts in view to send.");
+    ui.calMsg = "Sending…";
+    render();
+    try {
+      if (!ui.sync.token) ui.sync.token = await connectDrive(true);
+      const r = await pushShifts(ui.sync.token, inView, clients);
+      ui.calMsg = `${r.created} added, ${r.updated} updated in your "Respite Support" calendar.`;
+    } catch (err: any) {
+      ui.sync.token = null;
+      ui.calMsg = `Could not send: ${err.message}`;
+    }
+  });
 
   all("[data-print]", (el) => el.onclick = () => go(async () => {
     const mode = el.dataset.print!;
