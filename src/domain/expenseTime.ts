@@ -14,7 +14,8 @@ import type { Money } from "./primitives";
  */
 export function expenseAsMinutes(share: Money, ratePerHour: Money): number {
   if (ratePerHour <= 0) return 0; // no agreed rate, so nothing to convert against
-  return Math.round((share / ratePerHour) * 60);
+  // Up to the minute, to match how time is counted everywhere else.
+  return Math.ceil((share / ratePerHour) * 60);
 }
 
 /**

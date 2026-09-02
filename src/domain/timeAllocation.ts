@@ -56,12 +56,14 @@ export function allocateTime(participants: Participant[]): TimeClaim[] {
     const pairKey = `${p.clientId}:${p.payerPartyId}`;
     if (!seenPairs.has(pairKey)) {
       seenPairs.add(pairKey);
-      const minutes = Math.round(minutesByClient.get(p.clientId) ?? 0);
+      const minutes = Math.ceil(minutesByClient.get(p.clientId) ?? 0);
       claims.push({
         clientId: p.clientId,
         payerPartyId: p.payerPartyId,
         minutes,
-        amount: Math.round((minutes / 60) * p.payRate),
+        // Up to the cent. A rate times an odd number of minutes lands on a
+        // fraction, and the worker should not lose it.
+        amount: Math.ceil((minutes / 60) * p.payRate),
       });
     }
   }

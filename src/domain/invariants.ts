@@ -88,7 +88,7 @@ export function checkTrip(trip: Trip): Violation[] {
       continue;
     }
 
-    const expected = Math.round(s.distanceShare * s.rateApplied);
+    const expected = Math.ceil(s.distanceShare * s.rateApplied);
     if (s.claimAmount !== expected) {
       violations.push({
         code: "CLAIM_MISMATCH",

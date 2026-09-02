@@ -183,3 +183,13 @@ input[type="datetime-local"],input[type="date"]{max-width:100%}
 }
 tr.redaction td{background:var(--pink-soft);color:#6d2438}
 tr.net td{border-top:2px solid var(--line)}
+
+/* Calculator: a scratch pad, so it looks like a tool rather than a form. */
+select.view-calculator,.view-calculator{background:var(--orange-soft);border-color:var(--orange)}
+.calc-display{background:var(--panel);border:1px solid var(--line);padding:14px;margin-top:12px;text-align:right;
+  font-size:30px;font-weight:600;font-variant-numeric:tabular-nums;overflow-x:auto;white-space:nowrap}
+.calc-pad{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:8px}
+.calc-key{background:var(--panel);border:1px solid var(--line);color:var(--ink);padding:16px 0;font-size:18px;font-weight:600}
+.calc-key:hover{background:var(--orange-soft)}
+.calc-key.op{background:var(--cyan-soft);color:#0d4650}
+.calc-key.clear{background:var(--pink-soft);color:#6d2438}

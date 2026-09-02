@@ -8,6 +8,7 @@ import { buildInvoice, type Invoice } from "../domain/invoice";
 import { allocateTime } from "../domain/timeAllocation";
 import { printInvoices } from "./invoicePrint";
 import { renderCalendar, tallyByDay, GRAINS, spanFor, type Grain } from "./calendarView";
+import { newCalc, press, splitPreview, evenShares, type CalcState } from "./calculator";
 import { step, todayKey, dayKey } from "../domain/calendar";
 import { expenseAsMinutes, splitByPercent } from "../domain/expenseTime";
 import { tripShares } from "../domain/mileage";
@@ -59,9 +60,10 @@ const ui = {
     /** Set when Google refuses silently, so we ask rather than popping windows. */
     needsConnect: false,
   },
-  view: { as: "me", clientId: "" } as { as: "me" | "guardian" | "payer" | "archived" | "calendar"; clientId: string },
+  view: { as: "me", clientId: "" } as { as: "me" | "guardian" | "payer" | "archived" | "calendar" | "calculator"; clientId: string },
   cal: { anchor: todayKey(), grain: "week" as Grain },
   calMsg: "",
+  calc: newCalc() as CalcState,
   /**
    * What goes on the next invoice. A date range narrows it, and anything ticked
    * off is left out. Held here rather than on the records, because choosing not
@@ -260,6 +262,7 @@ async function render() {
           <option value="guardian"${ui.view.as === "guardian" ? " selected" : ""}>Guardian — one person only</option>
           <option value="payer"${ui.view.as === "payer" ? " selected" : ""}>Payer — expenses as extra time</option>
           <option value="calendar"${ui.view.as === "calendar" ? " selected" : ""}>Calendar — when it all happened</option>
+          <option value="calculator"${ui.view.as === "calculator" ? " selected" : ""}>Calculator — a scratch pad</option>
           <option value="archived"${ui.view.as === "archived" ? " selected" : ""}>Archived — put away, not gone</option>
         </select>
         ${ui.view.as === "guardian" || ui.view.as === "payer" ? `<select id="viewWho">
@@ -269,6 +272,7 @@ async function render() {
       </div>
     </section>
     ${ui.view.as === "me" ? ""
+      : ui.view.as === "calculator" ? calculatorSection()
       : ui.view.as === "calendar"
         // Everything that happened, settled or not. The calendar is a record of
         // when work was done, and a month emptying out as invoices are paid
@@ -618,6 +622,53 @@ function archivedView(people: Client[], shifts: Shift[], expenses: Expense[], ow
  * what prints as one page each. Anyone owed nothing is left out - a page
  * reading zero is noise on an invoice run.
  */
+/**
+ * A plain calculator, and a mode for splitting a total by percentage.
+ *
+ * Deliberately standalone: nothing here reads from or writes to the records. It
+ * is a scratch pad for working something out before typing it in.
+ */
+function calculatorSection() {
+  const c = ui.calc;
+  const keys = [["C", "±", "%", "/"], ["7", "8", "9", "*"], ["4", "5", "6", "-"], ["1", "2", "3", "+"], ["0", ".", "⌫", "="]];
+  const sp = splitPreview(c.total, c.shares);
+
+  return `<section class="card view-calculator">
+    <h2>Calculator</h2>
+    <div class="row">
+      <button class="tiny ${c.mode === "plain" ? "" : "ghost"}" data-calc-mode="plain">Plain</button>
+      <button class="tiny ${c.mode === "split" ? "" : "ghost"}" data-calc-mode="split">Split a total</button>
+    </div>
+
+    ${c.mode === "plain" ? `
+      <div class="calc-display">${c.entry}</div>
+      <div class="calc-pad">
+        ${keys.flat().map((k) => `<button class="calc-key${["/", "*", "-", "+", "="].includes(k) ? " op" : ""}${k === "C" ? " clear" : ""}" data-calc-key="${k}">${k}</button>`).join("")}
+      </div>
+      <p class="sub">Nothing here is saved or read by the app. Working out is yours.</p>`
+    : `
+      <div class="row">
+        <label style="flex:0 0 auto">Total $</label>
+        <input id="calcTotal" type="number" step="0.01" value="${c.total}" placeholder="0.00" style="max-width:160px" />
+        <button class="tiny ghost" data-calc-even="1">Even split</button>
+        <button class="tiny ghost" data-calc-add="1">Add a share</button>
+        ${c.shares.length > 2 ? `<button class="tiny ghost" data-calc-remove="1">Remove one</button>` : ""}
+      </div>
+      <table style="margin-top:10px">
+        <tr><th>Share</th><th class="n">Comes to</th></tr>
+        ${sp.rows.map((r, i) => `<tr>
+          <td><input type="number" step="0.1" data-calc-share="${i}" value="${r.percent}" style="max-width:110px" />%</td>
+          <td class="n">${sp.ok ? money(r.amount) : "—"}</td>
+        </tr>`).join("")}
+        <tr><td><b>${sp.sum.toFixed(2)}% allocated</b></td>
+          <td class="n"><b>${sp.ok ? money(sp.rows.reduce((t, r) => t + r.amount, 0)) : ""}</b></td></tr>
+      </table>
+      ${sp.ok ? `<p class="sub">Every cent accounted for — the parts add back to the total exactly.</p>`
+        : `<p class="flag">Shares have to add up to 100% before this can be split.</p>`}
+      <p class="sub">A scratch pad. Nothing here is saved, and the app does not read it.</p>`}
+  </section>`;
+}
+
 /** The calendar, with its own zoom and navigation. */
 function calendarSection(shifts: Shift[], expenses: Expense[], trips: Trip[], notes: Note[], name: (id: string) => string) {
   const span = spanFor(ui.cal.anchor, ui.cal.grain);
@@ -1566,6 +1617,19 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     });
     return buildInvoice(`payer-${cid}`, cid, c?.name ?? "Unknown", keep(allShifts), keep(allExpenses), keep(allTrips), keep(adjustments));
   };
+
+  all("[data-calc-key]", (el) => el.onclick = () => { ui.calc = press(ui.calc, el.dataset.calcKey!); render(); });
+  all("[data-calc-mode]", (el) => el.onclick = () => { ui.calc = { ...ui.calc, mode: el.dataset.calcMode as "plain" | "split" }; render(); });
+  all("[data-calc-even]", (el) => el.onclick = () => { ui.calc = { ...ui.calc, shares: evenShares(ui.calc.shares.length) }; render(); });
+  all("[data-calc-add]", (el) => el.onclick = () => { ui.calc = { ...ui.calc, shares: evenShares(ui.calc.shares.length + 1) }; render(); });
+  all("[data-calc-remove]", (el) => el.onclick = () => { ui.calc = { ...ui.calc, shares: evenShares(Math.max(2, ui.calc.shares.length - 1)) }; render(); });
+  all("[data-calc-share]", (el) => (el as HTMLInputElement).oninput = () => {
+    const next = [...ui.calc.shares];
+    next[Number(el.dataset.calcShare)] = parseFloat((el as HTMLInputElement).value || "0");
+    ui.calc = { ...ui.calc, shares: next };
+    render();
+  });
+  if ($("calcTotal")) $("calcTotal")!.oninput = () => { ui.calc = { ...ui.calc, total: $("calcTotal")!.value }; render(); };
 
   if ($("calGrain")) ($("calGrain") as unknown as HTMLSelectElement).onchange = (e: any) => {
     ui.cal.grain = e.target.value;

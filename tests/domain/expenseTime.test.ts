@@ -13,8 +13,12 @@ describe("expenseAsMinutes", () => {
     expect(expenseAsMinutes(3000, 1500)).toBe(120); // $30 at $15/hr
   });
 
-  it("rounds to the nearest minute", () => {
-    expect(expenseAsMinutes(1000, 3300)).toBe(18); // 18.18 min
+  it("rounds up to the minute, never down", () => {
+    // 18.18 minutes. Rounding down would hand the payer the fraction for free,
+    // and it happens on every conversion that does not land square.
+    expect(expenseAsMinutes(1000, 3300)).toBe(19);
+    expect(expenseAsMinutes(1, 3000)).toBe(1); // a cent is still a minute
+    expect(expenseAsMinutes(3000, 3000)).toBe(60); // exact stays exact
   });
 
   it("returns nothing when there is no agreed rate to convert against", () => {

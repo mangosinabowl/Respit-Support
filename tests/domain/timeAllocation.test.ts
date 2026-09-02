@@ -152,17 +152,16 @@ describe("allocateTime", () => {
 
   describe("splitEvenly rounding", () => {
     it("derives amount from rounded minutes so a payer's own arithmetic reconciles", () => {
-      // Three participants sharing 100 minutes (not evenly divisible)
-      // Each should get 33.333... minutes, rounded to 33
-      // Amount should be Math.round((33 / 60) * 3000)
+      // Three participants sharing 100 minutes, which does not divide evenly.
+      // Each is there for 33.33... minutes; a part minute is a minute worked,
+      // so it rounds UP to 34 rather than shaving the fraction off all three.
       const claims = allocateTime([
         p("c1", "2026-03-01T15:00:00.000Z", "2026-03-01T16:40:00.000Z", "splitEvenly"),
         p("c2", "2026-03-01T15:00:00.000Z", "2026-03-01T16:40:00.000Z", "splitEvenly"),
         p("c3", "2026-03-01T15:00:00.000Z", "2026-03-01T16:40:00.000Z", "splitEvenly"),
       ]);
-      // 100 minutes / 3 = 33.333..., rounds to 33
-      const expectedMinutes = 33;
-      const expectedAmount = Math.round((expectedMinutes / 60) * 3000);
+      const expectedMinutes = 34;
+      const expectedAmount = Math.ceil((expectedMinutes / 60) * 3000);
       claims.forEach((claim) => {
         expect(claim.minutes).toBe(expectedMinutes);
         expect(claim.amount).toBe(expectedAmount);

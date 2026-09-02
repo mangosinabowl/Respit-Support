@@ -31,7 +31,7 @@ export function tripShares(distance: number, ratePerUnit: Money, percents: numbe
   }
   const shares = percents.map((p) => {
     const distanceShare = (distance * p) / 100;
-    return { distanceShare, claim: Math.round(distanceShare * ratePerUnit) };
+    return { distanceShare, claim: Math.ceil(distanceShare * ratePerUnit) };
   });
   return { shares, total: shares.reduce((t, s) => t + s.claim, 0) };
 }

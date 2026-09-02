@@ -24,5 +24,9 @@ export function localZone(): IanaZone {
 
 /** Whole minutes between two instants. Negative if `to` precedes `from`. */
 export function minutesBetween(from: ISOInstant, to: ISOInstant): number {
-  return Math.round((Date.parse(to) - Date.parse(from)) / 60000);
+  // Rounds UP: a part minute is a minute the worker was there, and rounding it
+  // away would quietly shave time off every shift that does not end on the
+  // minute. Never negative - an outAt before inAt is zero, not a credit.
+  const ms = Date.parse(to) - Date.parse(from);
+  return ms <= 0 ? 0 : Math.ceil(ms / 60000);
 }
