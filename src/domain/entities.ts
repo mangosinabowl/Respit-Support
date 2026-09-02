@@ -7,6 +7,13 @@ export interface BaseRecord {
   recordedAt: ISOInstant;
   zone: IanaZone;
   deleted?: boolean;
+  /**
+   * Put away rather than removed. Archived records stay in every total they
+   * belong to - money already owed does not stop being owed because a record
+   * was tidied away - they are just kept out of the working views and pickers,
+   * and can be restored at any time.
+   */
+  archived?: boolean;
   tags: Id[];
   customFields: Record<string, string>;
 }
@@ -45,6 +52,7 @@ export interface Client extends BaseRecord {
    * full hour regardless of who else was there.
    */
   defaultTimeRule?: TimeRule;
+
   displayInitial: string;
   colour: string;
   dateOfBirth?: string;

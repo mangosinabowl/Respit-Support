@@ -30,7 +30,7 @@ const ui = {
   expFor: {} as Record<string, number>,
   /** Kept across re-renders so ticking a person does not wipe what was typed. */
   draft: { desc: "", amt: "" },
-  view: { as: "me", clientId: "" } as { as: "me" | "guardian" | "payer"; clientId: string },
+  view: { as: "me", clientId: "" } as { as: "me" | "guardian" | "payer" | "archived"; clientId: string },
   sort: { shifts: { key: "startAt", dir: -1 }, expenses: { key: "occurredAt", dir: -1 }, owed: { key: "unclaimed", dir: -1 } },
 };
 
@@ -71,13 +71,21 @@ const arrow = (s: { key: string; dir: number }, k: string) => s.key === k ? `<sp
 
 async function render() {
   const store = await hydrate(db);
-  const clients = live(store, "client") as unknown as Client[];
-  const allShifts = live(store, "shift") as unknown as Shift[];
-  const expenses = live(store, "expense") as unknown as Expense[];
+  const everyone = live(store, "client") as unknown as Client[];
+  // Archived people stay in `everyone` so their name still resolves on money
+  // they are owed; only `clients` is offered for new work.
+  const clients = everyone.filter((c) => !c.archived);
+  const archived = everyone.filter((c) => c.archived);
+  const shiftsAll = live(store, "shift") as unknown as Shift[];
+  const allExpenses = live(store, "expense") as unknown as Expense[];
+  // Archived records and settled expenses drop out of the working views but
+  // stay in every total, and stay restorable.
+  const allShifts = shiftsAll.filter((s) => !s.archived);
+  const expenses = allExpenses.filter((e) => !e.archived && e.reimbursementStatus !== "paid");
   const open = allShifts.find((s) => !s.endAt);
   const done = allShifts.filter((s) => s.endAt);
   const owed = owedByPayer(store);
-  const name = (id: string) => clients.find((c) => c.id === id)?.name ?? "\u2014";
+  const name = (id: string) => everyone.find((c) => c.id === id)?.name ?? "—";
 
   const totalMins = done.reduce((t, s) => t + s.participants.reduce((m, p) => Math.max(m, mins(p.inAt, p.outAt)), 0), 0);
   const totalOwed = owed.reduce((t, r) => t + r.unclaimed, 0);
@@ -101,11 +109,14 @@ async function render() {
           <option value="me"${ui.view.as === "me" ? " selected" : ""}>Me — everything</option>
           <option value="guardian"${ui.view.as === "guardian" ? " selected" : ""}>Guardian — one person only</option>
           <option value="payer"${ui.view.as === "payer" ? " selected" : ""}>Payer — expenses as extra time</option>
+          <option value="archived"${ui.view.as === "archived" ? " selected" : ""}>Archived — put away, not gone</option>
         </select>
-        ${ui.view.as !== "me" ? `<select id="viewWho">${clients.map((c) => `<option value="${c.id}"${ui.view.clientId === c.id ? " selected" : ""}>${c.name}</option>`).join("")}</select>` : ""}
+        ${ui.view.as === "guardian" || ui.view.as === "payer" ? `<select id="viewWho">${clients.map((c) => `<option value="${c.id}"${ui.view.clientId === c.id ? " selected" : ""}>${c.name}</option>`).join("")}</select>` : ""}
       </div>
     </section>
-    ${ui.view.as === "me" ? "" : shareView(ui.view.as, ui.view.clientId || clients[0]?.id || "", allShifts, expenses, clients, name)}
+    ${ui.view.as === "me" ? ""
+      : ui.view.as === "archived" ? archivedView(archived, allShifts, allExpenses, owed, name)
+      : shareView(ui.view.as, ui.view.clientId || clients[0]?.id || "", allShifts, expenses, everyone, name)}
 
     ${ui.view.as !== "me" ? "" : `
     <div class="grid">
@@ -151,9 +162,9 @@ async function render() {
                <button class="tiny" data-save-client="${c.id}">Save</button>
                <button class="tiny ghost" data-cancel="1">Cancel</button></div>
                <p class="sub" style="margin:6px 0 0">Changing the rate only affects shifts you log from now on. Shifts already recorded keep the rate they were logged at.</p></td></tr>`
-          : `<tr><td>${c.name}<br><span class="sub">${money(c.defaultRate ?? 3000)}/hr · ${RULE_LABEL[c.defaultTimeRule ?? "fullPerPayer"]}</span></td><td class="n">
+          : `<tr><td>${c.name}<br><span class="sub">${(c.defaultRate ?? 3000) === 0 ? "not billed" : `${money(c.defaultRate ?? 3000)}/hr · ${RULE_LABEL[c.defaultTimeRule ?? "fullPerPayer"]}`}</span></td><td class="n">
                <button class="tiny ghost" data-edit="${c.id}">Edit</button>
-               ${trash("client", c.id, c.name, "person")}</td></tr>`).join("")
+               <button class="tiny ghost" data-archive="${c.id}">Archive</button></td></tr>`).join("")
           || `<tr><td class="empty">Nobody yet</td></tr>`}
       </tbody></table>
       <div class="row"><input id="cname" placeholder="Name" /><input id="crate" type="number" step="0.5" value="30.00" style="max-width:120px" title="Hourly rate" /><button id="addc">Add</button></div>
@@ -190,6 +201,7 @@ async function render() {
                  .map((sp) => `${name(sp.clientId)} ${money(sp.amount)}`).join(" · ") || "nobody"}</span></td>
              <td>${day(e.occurredAt)}</td><td class="n">${money(e.totalAmount)}</td>
              <td class="n"><button class="tiny ghost" data-edit="${e.id}">Edit</button>
+             <button class="tiny ghost" data-paid="${e.id}">Mark paid</button>
              ${trash("expense", e.id, `${e.description} (${money(e.totalAmount)})`, "expense")}</td></tr>`).join("")}
       </table>` : `<p class="empty">None yet.</p>`}
       <div class="row"><input id="edesc" placeholder="What for?" value="${ui.draft.desc}" /><input id="eamt" type="number" placeholder="0.00" step="0.01" style="max-width:130px" value="${ui.draft.amt}" /></div>
@@ -240,6 +252,49 @@ async function render() {
  * money. A payer sees the same shares expressed as extra time at the rate
  * already agreed for that person - the rate itself is never altered.
  */
+/**
+ * Put away, not gone. Three separate areas, because they are archived for
+ * different reasons and restore differently: people you no longer work with,
+ * shifts you have tidied off the list, and expenses that have been paid.
+ * Nothing here is deleted, and anything still owed keeps counting in Owed.
+ */
+function archivedView(people: Client[], shifts: Shift[], expenses: Expense[], owed: ReturnType<typeof owedByPayer>, name: (id: string) => string) {
+  const archivedShifts = shifts.filter((s) => s.archived);
+  const paidExpenses = expenses.filter((e) => e.archived || e.reimbursementStatus === "paid");
+  const nothing = !people.length && !archivedShifts.length && !paidExpenses.length;
+
+  return `<section class="card">
+    <h2>Archived people</h2>
+    <p class="sub">Not offered when starting a shift or splitting an expense. Anything still owed keeps showing in Owed until it is claimed.</p>
+    ${people.length ? `<table><tbody>${people.map((c) => {
+      const row = owed.find((r) => r.payerPartyId === `payer-${c.id}`);
+      const out = row ? row.unclaimed + row.submitted : 0;
+      return `<tr><td>${c.name}<br><span class="sub">${out ? `${money(out)} still outstanding` : "nothing outstanding"}</span></td>
+        <td class="n"><button class="tiny pink" data-restore="${c.id}">Restore</button></td></tr>`;
+    }).join("")}</tbody></table>` : `<p class="empty">Nobody archived.</p>`}
+  </section>
+
+  <section class="card">
+    <h2>Archived shifts</h2>
+    ${archivedShifts.length ? `<table><tbody>${archivedShifts.map((s) => `<tr>
+      <td>${day(s.startAt)} ${hhmm(s.startAt)}${s.endAt ? `–${hhmm(s.endAt)}` : ""}<br>
+        <span class="sub">${s.participants.map((p) => name(p.clientId)).join(", ") || "nobody"}</span></td>
+      <td class="n"><button class="tiny pink" data-unarch-shift="${s.id}">Restore</button></td></tr>`).join("")}</tbody></table>`
+      : `<p class="empty">No archived shifts.</p>`}
+  </section>
+
+  <section class="card">
+    <h2>Expenses paid</h2>
+    <p class="sub">Settled and out of the way. They stay in the Paid column so the record still adds up.</p>
+    ${paidExpenses.length ? `<table><tbody>${paidExpenses.map((e) => `<tr>
+      <td>${e.description}<br><span class="sub">${day(e.occurredAt)} · ${e.splits.map((sp) => `${name(sp.clientId)} ${money(sp.amount)}`).join(" · ")}</span></td>
+      <td class="n">${money(e.totalAmount)}</td>
+      <td class="n"><button class="tiny pink" data-unpaid="${e.id}">Reopen</button></td></tr>`).join("")}</tbody></table>`
+      : `<p class="empty">Nothing paid off yet.</p>`}
+  </section>
+  ${nothing ? `<section class="card"><p class="sub">Nothing has been archived. Archiving puts things away without deleting them — you can bring anything back from here.</p></section>` : ""}`;
+}
+
 function shareView(as: "guardian" | "payer", clientId: string, shifts: Shift[], expenses: Expense[], clients: Client[], name: (id: string) => string) {
   const who = clients.find((c) => c.id === clientId);
   if (!who) return `<section class="card"><p class="empty">Add someone first.</p></section>`;
@@ -326,6 +381,7 @@ function shiftDetail(s: Shift, expenses: Expense[], done: Shift[], name: (id: st
     <p style="margin:6px 0">${attached.length ? attached.map((e) => `<span class="pill warn">${e.description} ${money(e.totalAmount)}</span>`).join("") : `<span class="empty">No expenses attached</span>`}</p>
     <div class="acts">
       <button class="tiny ghost" data-split="${s.id}">Split in half</button>
+      <button class="tiny ghost" data-arch-shift="${s.id}">Archive</button>
       ${others.length ? `<select id="mergeWith" style="width:auto">${others.map((o) => `<option value="${o.id}">${day(o.startAt)} ${hhmm(o.startAt)}</option>`).join("")}</select>
         <button class="tiny pink" data-merge="${s.id}">Merge with</button>` : ""}
       ${trash("shift", s.id, `${day(s.startAt)} ${hhmm(s.startAt)}–${hhmm(s.endAt!)}`, "shift")}
@@ -351,6 +407,26 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     ui.openShift = ui.openShift === el.dataset.shift ? null : el.dataset.shift!;
     ui.msg = "";
     render();
+  });
+
+  all("[data-arch-shift]", (el) => el.onclick = (e) => {
+    e.stopPropagation();
+    go(async () => { ui.openShift = null; await emit("shift", el.dataset.archShift!, { archived: true }); });
+  });
+  all("[data-paid]", (el) => el.onclick = (e) => {
+    e.stopPropagation();
+    go(() => emit("expense", el.dataset.paid!, { reimbursementStatus: "paid" }));
+  });
+  all("[data-unarch-shift]", (el) => el.onclick = () => go(() => emit("shift", el.dataset.unarchShift!, { archived: false })));
+  all("[data-unpaid]", (el) => el.onclick = () => go(() => emit("expense", el.dataset.unpaid!, { reimbursementStatus: "unclaimed", archived: false })));
+
+  all("[data-archive]", (el) => el.onclick = (e) => {
+    e.stopPropagation();
+    go(() => emit("client", el.dataset.archive!, { archived: true }));
+  });
+  all("[data-restore]", (el) => el.onclick = (e) => {
+    e.stopPropagation();
+    go(() => emit("client", el.dataset.restore!, { archived: false }));
   });
 
   all("[data-edit]", (el) => el.onclick = (e) => { e.stopPropagation(); ui.editing = el.dataset.edit!; render(); });
@@ -380,6 +456,7 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     const v = $("ren")!.value.trim();
     if (!v) return;
     const rate = Math.round(parseFloat($("rrate")!.value || "0") * 100);
+    if (rate < 0) throw new Error("A rate cannot be negative.");
     const rule = ($("rrule") as unknown as HTMLSelectElement).value;
     await emit("client", el.dataset.saveClient!, { name: v, defaultRate: rate, defaultTimeRule: rule });
     ui.editing = null;
@@ -443,8 +520,11 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
   if ($("addc")) $("addc")!.onclick = () => go(async () => {
     const v = $("cname")!.value.trim();
     if (!v) return;
-    const rate = Math.round(parseFloat($("crate")!.value || "30") * 100);
-    await emit("client", newId(), { name: v, defaultRate: rate, occurredAt: nowInstant(), recordedAt: nowInstant() });
+    const rate = Math.round(parseFloat($("crate")!.value || "0") * 100);
+    // $0 is allowed and meaningful: the worker himself appears on the list and
+    // is not paid for his own time. Only a negative rate is nonsense.
+    if (rate < 0) throw new Error("A rate cannot be negative.");
+    await emit("client", newId(), { name: v, defaultRate: rate, defaultTimeRule: "fullPerPayer", occurredAt: nowInstant(), recordedAt: nowInstant() });
   });
 
   if ($("start")) $("start")!.onclick = () => go(async () => {

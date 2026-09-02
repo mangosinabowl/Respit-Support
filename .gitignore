@@ -1,20 +1,20 @@
-# Client material — MUST NOT be committed
-*.pdf
-/Rory/
-/*.png
-/*.jpg
-/*.jpeg
 
+# Client material — MUST NOT be committed
+# Subagent-driven development scratch
 # Tooling
-node_modules/
-dist/
-dev-dist/
-coverage/
+*.local
+*.pdf
+.DS_Store
 .env
 .env.local
-*.local
-.DS_Store
-
-# Subagent-driven development scratch
 .superpowers/
+/*.jpeg
+/*.jpg
+/*.png
+/Rory/
+backups/
+coverage/
+dev-dist/
+dist/
+node_modules/
 test-output.txt
