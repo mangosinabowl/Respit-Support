@@ -137,7 +137,7 @@ async function render() {
            }).join("")}</tbody></table>
            ${clients.filter((c) => !open.participants.some((p) => p.clientId === c.id)).length
              ? `<div class="row"><select id="arrive">${clients.filter((c) => !open.participants.some((p) => p.clientId === c.id)).map((c) => `<option value="${c.id}">${c.name}</option>`).join("")}</select>
-                <input id="arate" type="number" value="${((clients.filter((c) => !open.participants.some((p) => p.clientId === c.id))[0].defaultRate ?? 3000) / 100).toFixed(2)}" step="0.5" style="max-width:110px" />
+                <input id="arate" type="number" value="${((clients.filter((c) => !open.participants.some((p) => p.clientId === c.id))[0].defaultRate ?? 0) / 100).toFixed(2)}" step="0.5" style="max-width:110px" />
                 <button class="pink" id="addp">Someone arrived</button></div>`
              : ""}
            <p class="sub">Each person settles their own way. Time is shared only between the people set to split — anyone on the full hour is not counted in that split.</p>
@@ -146,8 +146,8 @@ async function render() {
         : clients.length
           ? `<label>Who are you with?</label>
              <select id="who">${clients.map((c) => `<option value="${c.id}">${c.name}</option>`).join("")}</select>
-             <label>Rate $/hr (CAD)</label><input id="rate" type="number" value="${((clients[0].defaultRate ?? 3000) / 100).toFixed(2)}" step="0.5" />
-             <p class="sub">Their standing rate. Edit it under People to change it for good.</p>
+             <label>Rate $/hr (CAD)</label><input id="rate" type="number" value="${((clients[0].defaultRate ?? 0) / 100).toFixed(2)}" step="0.5" />
+             <p class="sub">Their own standing rate, and it is snapshotted onto this shift. Change it under People to change it from now on.</p>
              <button id="start" class="primary">Start shift</button>`
           : `<p class="empty">Add someone you support first.</p>`}
     </section>
@@ -157,17 +157,17 @@ async function render() {
       <table><tbody>
         ${clients.map((c) => ui.editing === c.id
           ? `<tr><td colspan="2"><div class="row"><input id="ren" value="${c.name}" />
-               <input id="rrate" type="number" step="0.5" style="max-width:110px" value="${((c.defaultRate ?? 3000) / 100).toFixed(2)}" title="Hourly rate" />
+               <input id="rrate" type="number" step="0.5" style="max-width:110px" value="${((c.defaultRate ?? 0) / 100).toFixed(2)}" title="Hourly rate" />
                ${ruleSelect("rrule", c.defaultTimeRule ?? "fullPerPayer")}
                <button class="tiny" data-save-client="${c.id}">Save</button>
                <button class="tiny ghost" data-cancel="1">Cancel</button></div>
                <p class="sub" style="margin:6px 0 0">Changing the rate only affects shifts you log from now on. Shifts already recorded keep the rate they were logged at.</p></td></tr>`
-          : `<tr><td>${c.name}<br><span class="sub">${(c.defaultRate ?? 3000) === 0 ? "not billed" : `${money(c.defaultRate ?? 3000)}/hr · ${RULE_LABEL[c.defaultTimeRule ?? "fullPerPayer"]}`}</span></td><td class="n">
+          : `<tr><td>${c.name}<br><span class="sub">${(c.defaultRate ?? 0) === 0 ? "not billed" : `${money(c.defaultRate ?? 0)}/hr · ${RULE_LABEL[c.defaultTimeRule ?? "fullPerPayer"]}`}</span></td><td class="n">
                <button class="tiny ghost" data-edit="${c.id}">Edit</button>
                <button class="tiny ghost" data-archive="${c.id}">Archive</button></td></tr>`).join("")
           || `<tr><td class="empty">Nobody yet</td></tr>`}
       </tbody></table>
-      <div class="row"><input id="cname" placeholder="Name" /><input id="crate" type="number" step="0.5" value="30.00" style="max-width:120px" title="Hourly rate" /><button id="addc">Add</button></div>
+      <div class="row"><input id="cname" placeholder="Name" /><input id="crate" type="number" step="0.5" value="0.00" style="max-width:120px" title="Hourly rate" /><button id="addc">Add</button></div>
     </section>
 
     <section class="card">
@@ -313,7 +313,7 @@ function shareView(as: "guardian" | "payer", clientId: string, shifts: Shift[], 
 
   const loose = expenses.filter((e) => !e.shiftId).flatMap((e) => e.splits.filter((sp) => sp.clientId === clientId));
   const looseTotal = loose.reduce((t, sp) => t + sp.amount, 0);
-  const rate = who.defaultRate ?? 3000;
+  const rate = who.defaultRate ?? 0;
 
   const totalWorked = rows.reduce((t, r) => t + r.worked, 0);
   const totalExtra = rows.reduce((t, r) => t + r.extra, 0) + expenseAsMinutes(looseTotal, rate);
@@ -511,7 +511,7 @@ function wire(open: Shift | undefined, clients: Client[], done: Shift[], expense
     if (!sel) return;
     sel.onchange = () => {
       const c = clients.find((x) => x.id === sel.value);
-      if (c) $(rateId)!.value = ((c.defaultRate ?? 3000) / 100).toFixed(2);
+      if (c) $(rateId)!.value = ((c.defaultRate ?? 0) / 100).toFixed(2);
     };
   };
   syncRate("who", "rate");
